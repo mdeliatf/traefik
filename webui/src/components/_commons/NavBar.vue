@@ -33,8 +33,44 @@
               <div class="tooltip" :class="{ 'is-dark-mode': $q.dark.isActive }">
                 <q-btn type="a" href="https://traefik.io/try-hub-now" target="_blank" flat no-caps label="Try Traefik Hub →" class="btn-menu btn-hub" />
                 <div class="content">
-                  <p>Extend your capabilities to API Management</p>
-                  <img alt="" v-bind:src="getHubLogoSrc($q.dark.isActive)" width="100px" />
+                  <div class="left">
+                    <label class="title">TRAEFIK HUB</label>
+                    <div class="features">
+                      <a href="https://traefik.io/explore-traefik-hub" target="_blank" rel="noopener noreferrer" title="Explore Traefik Hub">
+                        <div class="feature">
+                          <img alt="" src="statics/traefik-hub/feature-1.svg" width="48" height="48" />
+                          <div>
+                            <h3>K8s-native API Management</h3>
+                            <p>Publish, secure and manage APIs through CRDs, labels, and selectors.</p>
+                          </div>
+                        </div>
+                      </a>
+                      <a href="https://traefik.io/explore-traefik-hub" target="_blank" rel="noopener noreferrer" title="Explore Traefik Hub">
+                        <div class="feature">
+                          <img alt="" src="statics/traefik-hub/feature-2.svg" width="48" height="48" />
+                          <div>
+                            <h3>Centralized Control Plane</h3>
+                            <p>A simple management point for all APIs, users and infrastructure components.</p>
+                          </div>
+                        </div>
+                      </a>
+                      <a href="https://traefik.io/explore-traefik-hub" target="_blank" rel="noopener noreferrer" title="Explore Traefik Hub">
+                        <div class="feature">
+                          <img alt="" src="statics/traefik-hub/feature-3.svg" width="48" height="48" />
+                          <div>
+                            <h3>Self-serve API Portal</h3>
+                            <p>API discovery, documentation, testing, access control, and usage analytics.</p>
+                          </div>
+                        </div>
+                      </a>
+                    </div>
+                  </div>
+                  <div class="right">
+                    <img alt="" src="statics/traefik-hub/cta.jpg" width="288px" />
+                    <p>Your APIs deserve better</p>
+                    <a class="sign-up" href="https://traefik.io/try-hub-now" target="_blank" rel="noopener noreferrer" title="SIGN UP">SIGN UP</a>
+                    <a class="documentation" href="https://traefik.io/traefik-hub-docs" target="_blank" rel="noopener noreferrer" title="Documentation →">Documentation →</a>
+                  </div>
                 </div>
               </div>
               <q-btn @click="$q.dark.toggle()" stretch flat no-caps icon="invert_colors" :label="`${$q.dark.isActive ? 'Light' : 'Dark'} theme`" class="btn-menu" />
@@ -92,12 +128,7 @@ export default {
     }
   },
   methods: {
-    ...mapActions('core', { getVersion: 'getVersion' }),
-    getHubLogoSrc (isDarkMode) {
-      return isDarkMode
-        ? 'statics/hub-logo-horizontal-dark.png'
-        : 'statics/hub-logo-horizontal-clear.png'
-    }
+    ...mapActions('core', { getVersion: 'getVersion' })
   },
   created () {
     this.getVersion()
@@ -183,10 +214,9 @@ export default {
 
     .content {
       display: flex;
-      align-items: center;
       visibility: hidden;
       font-size: 16px;
-      padding: 20px;
+      padding: 40px 40px 40px 24px;
       border-radius: 16px;
       background-color: #fff;
       box-shadow: 0 0 6px rgba(0,0,0,0.16), 0 0 6px rgba(0,0,0,0.23);
@@ -195,7 +225,8 @@ export default {
       position: absolute;
       z-index: 1;
       top: 90%;
-      left: -5%;
+      left: -33%;
+      width: 836px;
 
       /* Fade in tooltip */
       opacity: 0;
@@ -211,16 +242,104 @@ export default {
         border-bottom: 10px solid #fff;
       }
 
-      p {
-        align-self: baseline;
-        color: var(--q-color-primary);
-        font-weight: bold;
-        margin: 0 20px 0 0;
-        max-width: 180px;
+      .left {
+        .title {
+          margin-left: 16px;
+          color: #677581;
+          font-size: 11px;
+          font-weight: 900;
+          letter-spacing: 3.67px;
+        }
+
+        .features {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          margin: 19px 92px 0 0;
+
+          a {
+            border-radius: 8px;
+            text-decoration: none;
+            transition: background-color 0.25s linear;
+
+            &:hover {
+              background-color: #f6fada;
+            }
+
+            .feature {
+              display: flex;
+              gap: 16px;
+              padding: 16px;
+
+              h3 {
+                color: #03192d;
+                font-size: 1rem;
+                font-weight: 600;
+                line-height: 22px;
+                margin: 0;
+              }
+
+              p {
+                color: #677581;
+                margin-bottom: 0;
+              }
+            }
+          }
+        }
       }
 
-      img {
-        margin: 0 20px;
+      .right {
+        flex-shrink: 0;
+        background-color: #060b21;
+        border-radius: 8px;
+        overflow: hidden;
+
+        p {
+          max-width: 288px;
+          padding: 0 32px;
+          margin: 18px 0;
+          color: #fff;
+          font-size: 1.375rem;
+          font-weight: 900;
+          line-height: 27px;
+          text-align: center;
+        }
+
+        .sign-up {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 40px;
+          margin: 0 20px 20px 20px;
+          color: #03192d;
+          background-color: #d5ea48;
+          border-radius: 8px;
+          font-size: 0.875rem;
+          font-weight: 900;
+          text-align: center;
+          text-decoration: none;
+          transition: background-color 0.25s linear;
+
+          &:hover {
+            background-color: #e5f291;
+          }
+        }
+
+        .documentation {
+          display: block;
+          margin: 0 auto 26px auto;
+          color: #fff;
+          font-size: 1rem;
+          font-weight: 900;
+          line-height: 22px;
+          text-align: center;
+          text-decoration: none;
+          transition: opacity 0.25s linear;
+
+          &:hover {
+            opacity: 0.7;
+          }
+        }
       }
     }
 
@@ -232,8 +351,26 @@ export default {
         border-bottom: 10px solid #262626;
       }
 
-      p {
-        color: #fff;
+      .left {
+        .title {
+          color: rgba(255, 255, 255, 0.74);
+        }
+
+        .features a {
+          &:hover {
+            background-color: #373e27;
+          }
+
+          .feature {
+            h3 {
+              color: #fff;
+            }
+
+            p {
+              color: rgba(255, 255, 255, 0.74);
+            }
+          }
+        }
       }
     }
 
