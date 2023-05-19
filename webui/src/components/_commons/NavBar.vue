@@ -216,7 +216,7 @@ export default {
       display: flex;
       visibility: hidden;
       font-size: 16px;
-      padding: 40px 40px 40px 24px;
+      padding: 40px;
       border-radius: 16px;
       background-color: #fff;
       box-shadow: 0 0 6px rgba(0,0,0,0.16), 0 0 6px rgba(0,0,0,0.23);
@@ -225,8 +225,8 @@ export default {
       position: absolute;
       z-index: 1;
       top: 90%;
-      left: -33%;
-      width: 836px;
+      left: -32%;
+      width: 800px;
 
       /* Fade in tooltip */
       opacity: 0;
@@ -255,7 +255,7 @@ export default {
           display: flex;
           flex-direction: column;
           gap: 10px;
-          margin: 19px 92px 0 0;
+          margin: 19px 40px 0 0;
 
           a {
             border-radius: 8px;
