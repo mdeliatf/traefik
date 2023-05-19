@@ -212,6 +212,22 @@ export default {
   .tooltip {
     display: inline-block;
 
+    .btn-menu.btn-hub::after {
+      content: "";
+      visibility: hidden;
+      position: absolute;
+      top: 88%;
+      right: calc(50% - 7px);
+      z-index: 2;
+      border-left: 7px solid transparent;
+      border-right: 7px solid transparent;
+      border-bottom: 10px solid #fff;
+
+      /* Fade in */
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
     .content {
       display: flex;
       visibility: hidden;
@@ -221,26 +237,16 @@ export default {
       background-color: #fff;
       box-shadow: 0 0 6px rgba(0,0,0,0.16), 0 0 6px rgba(0,0,0,0.23);
 
-      /* Position the tooltip text */
+      /* Position */
       position: absolute;
       z-index: 1;
       top: 90%;
-      left: -32%;
+      right: 0;
       width: 800px;
 
-      /* Fade in tooltip */
+      /* Fade in */
       opacity: 0;
       transition: opacity 0.3s;
-
-      &::after {
-        content: "";
-        position: absolute;
-        top: -10px;
-        left: 22%;
-        border-left: 7px solid transparent;
-        border-right: 7px solid transparent;
-        border-bottom: 10px solid #fff;
-      }
 
       .left {
         .title {
@@ -374,9 +380,36 @@ export default {
       }
     }
 
-    &:hover .content {
-      visibility: visible;
-      opacity: 1;
+    &:hover {
+      .btn-menu.btn-hub::after, .content {
+        visibility: visible;
+        opacity: 1;
+      }
+    }
+  }
+
+  @media screen and (max-width: 768px) {
+    .tooltip {
+      .btn-menu.btn-hub::after {
+        top: 69%;
+      }
+
+      .content {
+        padding: 20px;
+        top: 100%;
+        right: 100px;
+        width: 740px;
+
+        .left .features {
+          margin: 19px 20px 0 0;
+        }
+      }
+    }
+  }
+
+  @media screen and (min-width: 769px) and (max-width: 1024px) {
+    .tooltip .content {
+      top: 100%;
     }
   }
 
