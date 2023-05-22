@@ -349,31 +349,34 @@ export default {
       }
     }
 
-    &.is-dark-mode .content {
-      background-color: #262626;
-      box-shadow: 0 0 6px rgba(10,18,36,0.16), 0 0 6px rgba(10,18,36,0.23);
+    &.is-dark-mode {
 
-      &::after {
+      .btn-menu.btn-hub::after {
         border-bottom: 10px solid #262626;
       }
 
-      .left {
-        .title {
-          color: rgba(255, 255, 255, 0.74);
-        }
+      .content {
+        background-color: #262626;
+        box-shadow: 0 0 6px rgba(10,18,36,0.16), 0 0 6px rgba(10,18,36,0.23);
 
-        .features a {
-          &:hover {
-            background-color: #373e27;
+        .left {
+          .title {
+            color: rgba(255, 255, 255, 0.74);
           }
 
-          .feature {
-            h3 {
-              color: #fff;
+          .features a {
+            &:hover {
+              background-color: #373e27;
             }
 
-            p {
-              color: rgba(255, 255, 255, 0.74);
+            .feature {
+              h3 {
+                color: #fff;
+              }
+
+              p {
+                color: rgba(255, 255, 255, 0.74);
+              }
             }
           }
         }
