@@ -36,33 +36,27 @@
                   <div class="left">
                     <label class="title">TRAEFIK HUB</label>
                     <div class="features">
-                      <a href="https://traefik.io/explore-traefik-hub" target="_blank" rel="noopener noreferrer" title="Explore Traefik Hub">
-                        <div class="feature">
-                          <img alt="" src="statics/traefik-hub/feature-1.svg" width="48" height="48" />
-                          <div>
-                            <h3>K8s-native API Management</h3>
-                            <p>Publish, secure and manage APIs through CRDs, labels, and selectors.</p>
-                          </div>
+                      <div class="feature">
+                        <img alt="" src="statics/traefik-hub/feature-1.svg" width="48" height="48" />
+                        <div>
+                          <h3>K8s-native API Management</h3>
+                          <p>Publish, secure and manage APIs through CRDs, labels, and selectors.</p>
                         </div>
-                      </a>
-                      <a href="https://traefik.io/explore-traefik-hub" target="_blank" rel="noopener noreferrer" title="Explore Traefik Hub">
-                        <div class="feature">
-                          <img alt="" src="statics/traefik-hub/feature-2.svg" width="48" height="48" />
-                          <div>
-                            <h3>Centralized Control Plane</h3>
-                            <p>A simple management point for all APIs, users and infrastructure components.</p>
-                          </div>
+                      </div>
+                      <div class="feature">
+                        <img alt="" src="statics/traefik-hub/feature-2.svg" width="48" height="48" />
+                        <div>
+                          <h3>Centralized Control Plane</h3>
+                          <p>A simple management point for all APIs, users and infrastructure components.</p>
                         </div>
-                      </a>
-                      <a href="https://traefik.io/explore-traefik-hub" target="_blank" rel="noopener noreferrer" title="Explore Traefik Hub">
-                        <div class="feature">
-                          <img alt="" src="statics/traefik-hub/feature-3.svg" width="48" height="48" />
-                          <div>
-                            <h3>Self-serve API Portal</h3>
-                            <p>API discovery, documentation, testing, access control, and usage analytics.</p>
-                          </div>
+                      </div>
+                      <div class="feature">
+                        <img alt="" src="statics/traefik-hub/feature-3.svg" width="48" height="48" />
+                        <div>
+                          <h3>Self-serve API Portal</h3>
+                          <p>API discovery, documentation, testing, access control, and usage analytics.</p>
                         </div>
-                      </a>
+                      </div>
                     </div>
                   </div>
                   <div class="right">
@@ -263,32 +257,22 @@ export default {
           gap: 10px;
           margin: 19px 40px 0 0;
 
-          a {
-            border-radius: 8px;
-            text-decoration: none;
-            transition: background-color 0.25s linear;
+          .feature {
+            display: flex;
+            gap: 16px;
+            padding: 16px;
 
-            &:hover {
-              background-color: #f6fada;
+            h3 {
+              color: #03192d;
+              font-size: 1rem;
+              font-weight: 600;
+              line-height: 22px;
+              margin: 0;
             }
 
-            .feature {
-              display: flex;
-              gap: 16px;
-              padding: 16px;
-
-              h3 {
-                color: #03192d;
-                font-size: 1rem;
-                font-weight: 600;
-                line-height: 22px;
-                margin: 0;
-              }
-
-              p {
-                color: #677581;
-                margin-bottom: 0;
-              }
+            p {
+              color: #677581;
+              margin-bottom: 0;
             }
           }
         }
@@ -364,19 +348,13 @@ export default {
             color: rgba(255, 255, 255, 0.74);
           }
 
-          .features a {
-            &:hover {
-              background-color: #373e27;
+          .features .feature {
+            h3 {
+              color: #fff;
             }
 
-            .feature {
-              h3 {
-                color: #fff;
-              }
-
-              p {
-                color: rgba(255, 255, 255, 0.74);
-              }
+            p {
+              color: rgba(255, 255, 255, 0.74);
             }
           }
         }
