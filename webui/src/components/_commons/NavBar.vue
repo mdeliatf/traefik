@@ -69,7 +69,7 @@
                     <img alt="" src="statics/traefik-hub/cta.jpg" width="288px" />
                     <p>Your APIs deserve better</p>
                     <a class="sign-up" href="https://traefik.io/try-hub-now" target="_blank" rel="noopener noreferrer" title="SIGN UP">SIGN UP</a>
-                    <a class="documentation" href="https://traefik.io/traefik-hub-docs" target="_blank" rel="noopener noreferrer" title="Documentation →">Documentation →</a>
+                    <a class="documentation" href="https://traefik.io/explore-traefik-hub" target="_blank" rel="noopener noreferrer" title="Learn more">Learn more →</a>
                   </div>
                 </div>
               </div>
