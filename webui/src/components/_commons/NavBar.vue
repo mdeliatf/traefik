@@ -31,7 +31,12 @@
           <div class="right-menu">
             <q-tabs>
               <div class="tooltip" :class="{ 'is-dark-mode': $q.dark.isActive }">
-                <q-btn type="a" href="https://traefik.io/try-hub-now" target="_blank" flat no-caps label="Try Traefik Hub →" class="btn-menu btn-hub" />
+                <q-btn type="a" href="https://traefik.io/try-hub-now" target="_blank" flat no-caps class="btn-menu btn-hub">
+                  <div class="btn-hub-content">
+                    <img alt="" src="statics/traefik-hub/traefik-hub-icon.svg" width="24" height="24" />
+                    <label>Try Traefik Hub</label>
+                  </div>
+                </q-btn>
                 <div class="content">
                   <div class="left">
                     <label class="title">TRAEFIK HUB</label>
@@ -190,8 +195,19 @@ export default {
   }
 
   .btn-hub {
-    color: #dedede;
-    background: #5f6572;
+    margin-right: 0.5rem;
+    color: #fff;
+    background: #253146;
+    border-radius: 8px;
+    font-weight: 900;
+    line-height: inherit;
+
+    .btn-hub-content {
+      display: flex;
+      align-items: center;
+      flex-wrap: nowrap !important;
+      gap: 8px;
+    }
   }
 
   .q-item {
@@ -371,8 +387,16 @@ export default {
 
   @media screen and (max-width: 768px) {
     .tooltip {
-      .btn-menu.btn-hub::after {
-        top: 69%;
+      .btn-hub {
+        line-height: 1em;
+
+        &::after {
+          top: 69%;
+        }
+
+        .btn-hub-content {
+          gap: 8px;
+        }
       }
 
       .content {
@@ -389,8 +413,19 @@ export default {
   }
 
   @media screen and (min-width: 769px) and (max-width: 1024px) {
-    .tooltip .content {
-      top: 100%;
+    .tooltip {
+      .btn-hub {
+        margin-right: 0;
+        line-height: 1.25em;
+
+        .btn-hub-content {
+          gap: 4px;
+        }
+      }
+
+      .content {
+        top: 100%;
+      }
     }
   }
 
