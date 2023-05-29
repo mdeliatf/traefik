@@ -39,36 +39,39 @@
                 </q-btn>
                 <div class="content">
                   <div class="left">
-                    <label class="title">TRAEFIK HUB</label>
+                    <img alt="" src="statics/traefik-hub/cta.jpg" width="374px" />
+                    <p>Your APIs deserve better</p>
+                    <a class="sign-up" href="https://traefik.io/try-hub-now" target="_blank" rel="noopener noreferrer" title="TRY TRAEFIK HUB FOR FREE">
+                      TRY TRAEFIK HUB FOR FREE
+                    </a>
+                  </div>
+                  <div class="right">
                     <div class="features">
                       <div class="feature">
-                        <img alt="" src="statics/traefik-hub/feature-1.svg" width="48" height="48" />
+                        <img alt="" src="statics/traefik-hub/check.svg" width="32" height="32" />
                         <div>
                           <h3>K8s-native API Management</h3>
                           <p>Publish, secure and manage APIs through CRDs, labels, and selectors.</p>
                         </div>
                       </div>
                       <div class="feature">
-                        <img alt="" src="statics/traefik-hub/feature-2.svg" width="48" height="48" />
+                        <img alt="" src="statics/traefik-hub/check.svg" width="32" height="32" />
                         <div>
                           <h3>Centralized Control Plane</h3>
                           <p>A simple management point for all APIs, users and infrastructure components.</p>
                         </div>
                       </div>
                       <div class="feature">
-                        <img alt="" src="statics/traefik-hub/feature-3.svg" width="48" height="48" />
+                        <img alt="" src="statics/traefik-hub/check.svg" width="32" height="32" />
                         <div>
                           <h3>Self-serve API Portal</h3>
                           <p>API discovery, documentation, testing, access control, and usage analytics.</p>
                         </div>
                       </div>
                     </div>
-                  </div>
-                  <div class="right">
-                    <img alt="" src="statics/traefik-hub/cta.jpg" width="288px" />
-                    <p>Your APIs deserve better</p>
-                    <a class="sign-up" href="https://traefik.io/try-hub-now" target="_blank" rel="noopener noreferrer" title="SIGN UP">SIGN UP</a>
-                    <a class="documentation" href="https://traefik.io/explore-traefik-hub" target="_blank" rel="noopener noreferrer" title="Learn more">Learn more →</a>
+                    <a class="learn-more" href="https://traefik.io/explore-traefik-hub" target="_blank" rel="noopener noreferrer" title="Learn more about Traefik Hub">
+                      Learn more about Traefik Hub →
+                    </a>
                   </div>
                 </div>
               </div>
@@ -242,81 +245,42 @@ export default {
       display: flex;
       visibility: hidden;
       font-size: 16px;
-      padding: 40px;
       border-radius: 16px;
       background-color: #fff;
       box-shadow: 0 0 6px rgba(0,0,0,0.16), 0 0 6px rgba(0,0,0,0.23);
+      overflow: hidden;
 
       /* Position */
       position: absolute;
       z-index: 1;
       top: 90%;
       right: 0;
-      width: 800px;
+      width: 836px;
 
       /* Fade in */
       opacity: 0;
       transition: opacity 0.3s;
 
       .left {
-        .title {
-          margin-left: 16px;
-          color: #677581;
-          font-size: 11px;
-          font-weight: 900;
-          letter-spacing: 3.67px;
-        }
-
-        .features {
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-          margin: 19px 40px 0 0;
-
-          .feature {
-            display: flex;
-            gap: 16px;
-            padding: 16px;
-
-            h3 {
-              color: #03192d;
-              font-size: 1rem;
-              font-weight: 600;
-              line-height: 22px;
-              margin: 0;
-            }
-
-            p {
-              color: #677581;
-              margin-bottom: 0;
-            }
-          }
-        }
-      }
-
-      .right {
         flex-shrink: 0;
+        padding: 9px 22px 40px 22px;
         background-color: #060b21;
-        border-radius: 8px;
-        overflow: hidden;
+        text-align: center;
 
         p {
           max-width: 288px;
-          padding: 0 32px;
-          margin: 18px 0;
-          color: #fff;
-          font-size: 1.375rem;
+          margin: 13px auto 31px auto;
+          color: #f9fafa;
+          font-size: 2.25rem;
           font-weight: 900;
-          line-height: 27px;
+          line-height: 1.33;
           text-align: center;
         }
 
         .sign-up {
-          display: flex;
-          align-items: center;
-          justify-content: center;
+          display: inline-block;
           height: 40px;
-          margin: 0 20px 20px 20px;
+          padding: 10px 25px;
           color: #03192d;
           background-color: #d5ea48;
           border-radius: 8px;
@@ -330,11 +294,40 @@ export default {
             background-color: #e5f291;
           }
         }
+      }
 
-        .documentation {
+      .right {
+        padding: 48px 32px;
+
+        .features {
+          display: flex;
+          flex-direction: column;
+          gap: 26px;
+          margin: 7px 0 53px 0;
+
+          .feature {
+            display: flex;
+            gap: 16px;
+
+            h3 {
+              color: #03192d;
+              font-size: 1rem;
+              font-weight: 900;
+              line-height: 22px;
+              margin: 0;
+            }
+
+            p {
+              color: #677581;
+              margin-bottom: 0;
+            }
+          }
+        }
+
+        .learn-more {
           display: block;
-          margin: 0 auto 26px auto;
-          color: #fff;
+          margin: 0 auto;
+          color: #03192d;
           font-size: 1rem;
           font-weight: 900;
           line-height: 22px;
@@ -352,26 +345,27 @@ export default {
     &.is-dark-mode {
 
       .btn-menu.btn-hub::after {
-        border-bottom: 10px solid #262626;
+        border-bottom: 10px solid #060b21;
       }
 
       .content {
-        background-color: #262626;
+        background-color: #060b21;
         box-shadow: 0 0 6px rgba(10,18,36,0.16), 0 0 6px rgba(10,18,36,0.23);
 
-        .left {
-          .title {
-            color: rgba(255, 255, 255, 0.74);
-          }
+        .right {
 
           .features .feature {
             h3 {
-              color: #fff;
+              color: #f9fafa;
             }
 
             p {
-              color: rgba(255, 255, 255, 0.74);
+              color: #818c96;
             }
+          }
+
+          .learn-more {
+            color: #fff;
           }
         }
       }
@@ -400,13 +394,12 @@ export default {
       }
 
       .content {
-        padding: 20px;
         top: 100%;
-        right: 100px;
-        width: 740px;
+        right: 142px;
+        width: 768px;
 
-        .left .features {
-          margin: 19px 20px 0 0;
+        .left img {
+          width: 300px;
         }
       }
     }
