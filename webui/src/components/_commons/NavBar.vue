@@ -51,13 +51,13 @@
                         <img alt="" src="statics/traefik-hub/check.svg" width="32" height="32" />
                         <div>
                           <h3>K8s-native API Management</h3>
-                          <p>Publish, secure and manage APIs through CRDs, labels, and selectors.</p>
+                          <p>K8s services auto-discovery, 100% CRDs configuration, full GitOps compliance.</p>
                         </div>
                       </div>
                       <div class="feature">
                         <img alt="" src="statics/traefik-hub/check.svg" width="32" height="32" />
                         <div>
-                          <h3>Centralized Control Plane</h3>
+                          <h3>Central Control Plane</h3>
                           <p>A simple management point for all APIs, users and infrastructure components.</p>
                         </div>
                       </div>
@@ -65,7 +65,7 @@
                         <img alt="" src="statics/traefik-hub/check.svg" width="32" height="32" />
                         <div>
                           <h3>Self-serve API Portal</h3>
-                          <p>API discovery, documentation, testing, access control, and usage analytics.</p>
+                          <p>API discovery, documentation, testing, and access control.</p>
                         </div>
                       </div>
                     </div>
@@ -303,7 +303,7 @@ export default {
           display: flex;
           flex-direction: column;
           gap: 26px;
-          margin: 7px 0 53px 0;
+          margin: 7px 5px 53px 0;
 
           .feature {
             display: flex;
