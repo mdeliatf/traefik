@@ -34,15 +34,15 @@
                 <q-btn type="a" href="https://traefik.io/try-hub-now" target="_blank" flat no-caps class="btn-menu btn-hub">
                   <div class="btn-hub-content">
                     <img alt="" src="statics/traefik-hub/traefik-hub-icon.svg" width="24" height="24" />
-                    <label>Try Traefik Hub</label>
+                    <label>Traefik Hub</label>
                   </div>
                 </q-btn>
                 <div class="content">
                   <div class="left">
                     <img alt="" src="statics/traefik-hub/cta.jpg" width="374px" />
                     <p>Your APIs deserve better</p>
-                    <a class="sign-up" href="https://traefik.io/try-hub-now" target="_blank" rel="noopener noreferrer" title="TRY TRAEFIK HUB FOR FREE">
-                      TRY TRAEFIK HUB FOR FREE
+                    <a class="sign-up" href="https://traefik.io/try-hub-now" target="_blank" rel="noopener noreferrer" title="TRY TRAEFIK HUB">
+                      TRY TRAEFIK HUB
                     </a>
                   </div>
                   <div class="right">
