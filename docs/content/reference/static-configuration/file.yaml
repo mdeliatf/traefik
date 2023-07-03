@@ -291,7 +291,7 @@ api:
   insecure: true
   dashboard: true
   debug: true
-  disableDashboardAd: false
+  disabledashboardad: false
 metrics:
   prometheus:
     buckets:
