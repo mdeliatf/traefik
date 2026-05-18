@@ -44,6 +44,8 @@ The middleware chain is ordered: middlewares run in the sequence declared on the
 
 Read two or three existing files in the same package before adding a new one, and copy their structure. Do not invent new directory layouts, file-naming conventions, or abstraction boundaries — match the neighbours. When adding a new provider, read two existing providers under `pkg/provider/`; when adding a middleware, read two under `pkg/middlewares/`.
 
+When the GoLand MCP server is available, prefer it for code exploration (symbol lookup, file reads, regex/text search across the project) over generic shell tools — it uses the IDE's index and is dramatically faster. Note that MCP tools may be deferred at session start: load them via `ToolSearch` before falling back to `find`/`grep` or launching a search agent.
+
 ## Build, test, lint
 
 The Go version is declared in [`go.mod`](./go.mod) — check there rather than hard-coding a version. All day-to-day commands go through `make`:
@@ -104,6 +106,13 @@ Traefik welcomes AI-assisted contributions, provided a few simple rules are foll
 - **Declare substantial AI assistance** with an `Assisted-by:` trailer at the bottom of the commit message whenever an agent produced a meaningful portion of the diff — for example `Assisted-by: Claude Opus 4.6`. Trivial edits such as a typo fix or a one-line rename do not need a trailer.
 - **Keep issue and PR conversations human.** Do not let an agent post comments, review replies, or triage messages on your behalf. If an agent drafted a message for you, rewrite it in your own voice before sending — maintainers need to know they are talking to a person, not a bot.
 - **Align with a maintainer before generating code for anything larger than a bug fix.** An agent can produce thousands of lines in minutes; maintainer review capacity cannot scale the same way. Open an issue, state the intended approach, and wait for confirmation before asking an agent to implement it.
+
+## Package deep-dives
+
+When the work touches a specific subsystem, load the matching reference doc — these are denser than the per-package neighbours and save a lot of exploration:
+
+- **Kubernetes providers — shared patterns** (`pkg/provider/kubernetes/`): see [`.claude/kubernetes_providers.md`](./.claude/kubernetes_providers.md). Common skeleton for the three K8s providers — client construction, watch/event flow, `Provide` loop, hash-dedup, throttling, status updates.
+- **Kubernetes Gateway API provider** (`pkg/provider/kubernetes/gateway/`): see [`.claude/gateway_api_provider.md`](./.claude/gateway_api_provider.md). Builds on the shared K8s-provider doc.
 
 ## Things to avoid
 
