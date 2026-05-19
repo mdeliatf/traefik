@@ -84,11 +84,6 @@ type Provider struct {
 
 	routerTransform k8s.RouterTransform
 	client          *clientWrapper
-
-	// rebuildHook, if set, is called at the end of every
-	// loadConfigurationFromGateways invocation with the rebuild duration.
-	// Test-only instrumentation, nil in production.
-	rebuildHook func(time.Duration)
 }
 
 // Entrypoint defines the available entry points.
@@ -297,11 +292,6 @@ func (p *Provider) newK8sClient(ctx context.Context) (*clientWrapper, error) {
 
 // TODO Handle errors and update resources statuses (gatewayClass, gateway).
 func (p *Provider) loadConfigurationFromGateways(ctx context.Context) *dynamic.Configuration {
-	if p.rebuildHook != nil {
-		start := time.Now()
-		defer func() { p.rebuildHook(time.Since(start)) }()
-	}
-
 	conf := &dynamic.Configuration{
 		HTTP: &dynamic.HTTPConfiguration{
 			Routers:           map[string]*dynamic.Router{},

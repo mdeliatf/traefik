@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Gateway-status perf benchmark driver (Layer 2).
+# Gateway-status perf benchmark driver.
 #
 # Spins up a single-node kind cluster with audit logging, builds the
 # current Traefik HEAD into a Docker image, loads it into the cluster,

@@ -1,11 +1,11 @@
-# Gateway-status perf benchmark (Layer 2)
+# Gateway-status perf benchmark
 
 End-to-end reproduction of the Howard John Gateway API bench v1 "Attached
-Routes" scenario against a real Kubernetes cluster. Used as a sanity check
-that Layer 1's in-process envtest numbers (see
-`pkg/provider/kubernetes/gateway/perf_test.go`) track real-cluster numbers.
+Routes" scenario against a real Kubernetes cluster, used to measure
+"time-to-stable AttachedRoutes" at N HTTPRoutes attached to a single
+Gateway.
 
-See `.claude/gateway_status_async_spec.md` §4.2 for the design.
+See `.claude/gateway_status_async_spec.md` §4.1 for the design.
 
 ## Prerequisites
 
@@ -34,7 +34,7 @@ What it does:
    audit policy from `audit.yaml` mounted into the apiserver.
 2. Builds the local Traefik image (`make build-image` → `traefik/traefik:latest`)
    and loads it into the cluster.
-3. Installs Gateway API CRDs (v1.5.1, same version as Layer 1).
+3. Installs Gateway API CRDs (v1.5.1, matching the version in `go.mod`).
 4. Installs Traefik via the official Helm chart with
    [`values.yaml`](./values.yaml) — `kubernetesGateway.enabled=true`,
    `throttleDuration=0`, image `pullPolicy=Never`.
@@ -79,17 +79,3 @@ kind control-plane node and counts status updates on
 Traefik's own write counter.
 
 Both reports land in `$TMPDIR` and are printed at the end of the run.
-
-## Comparing with Layer 1
-
-Layer 1 (`go test -run=TestStatusPerf -perf -routes=1000 ./pkg/provider/kubernetes/gateway/`)
-runs the provider in-process against `envtest`. envtest's apiserver is
-much faster than a kind apiserver, so route creates land back-to-back
-faster than the provider can rebuild — informer events coalesce, and
-the time-to-stable reflects only the provider's internal throughput.
-
-Layer 2 introduces realistic apiserver round-trip latency, which spaces
-creates out enough that the provider rebuilds once per event. This is
-the regime the upstream bench measured (180s at N=1000). If Layer 2's
-time-to-stable matches the bench's order of magnitude, Layer 1 is
-trustworthy for iterating on the rebuild path.

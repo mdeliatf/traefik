@@ -2,9 +2,9 @@
 
 Branch: `fix/gateway-api-hackathon`
 Package: `pkg/provider/kubernetes/gateway/`
-Status: Step 1 landed (Layer 1 + Layer 2 + instrumentation). Step 1
-findings — measured results, harness runbook, what's confirmed vs not —
-are in [`gateway_status_async_findings.md`](./gateway_status_async_findings.md).
+Status: Step 1 landed (kind-based perf harness under `hack/perf/`).
+Measurement runbook and observed numbers are in
+[`gateway_status_async_findings.md`](./gateway_status_async_findings.md).
 Steps 2 and 3 are validated by the data and ready to implement.
 
 ## 1. Context
@@ -70,9 +70,11 @@ Inside `clientWrapper.UpdateXxxStatus`:
 > **Status:** this section is the **pre-measurement hypothesis** that
 > motivated the harness in §4. The measured truth is recorded in
 > [`gateway_status_async_findings.md`](./gateway_status_async_findings.md)
-> — in short, status I/O (97% of rebuild wall time under burst load) is
-> the dominant cost, not O(N²) iteration. The bullets below are kept as
-> a record of the reasoning that led to the harness design.
+> — in short, status I/O is the dominant cost (1000 status writes
+> serialised behind a single goroutine; the bench's AttachedRoutes
+> counter only ticks 3 times in 197s), not O(N²) iteration. The bullets
+> below are kept as a record of the reasoning that led to the harness
+> design.
 
 Because dedup works, the API writes themselves can't account for 180s.
 The hypothesis (to be verified by profiling, see §4) is:
@@ -123,10 +125,12 @@ yes; NGF: not yet).
 
 ### Goals
 
-- **Move status I/O off the rebuild critical path.** *Why:* 97% of
-  rebuild wall time today is `UpdateStatus` round-trips (Layer 1
-  measurement). The rebuild can't return — and the dynamic config
-  can't ship — until they all finish.
+- **Move status I/O off the rebuild critical path.** *Why:* under
+  burst load the rebuild loop is dominated by `UpdateStatus`
+  round-trips serialised on the event-loop goroutine (the kind harness
+  shows 1000 status writes draining over 197s while AttachedRoutes
+  only ticks 3 times). The rebuild can't return — and the dynamic
+  config can't ship — until they all finish.
 - **Schedule Gateway/GatewayClass writes ahead of route writes
   inside a flush.** *Why:* the bench measures convergence on
   `Gateway.AttachedRoutes`. If that one tiny write sits behind
@@ -135,9 +139,9 @@ yes; NGF: not yet).
 - **Stop writing foreign-controller `RouteParentStatus` entries.**
   *Why:* causes ping-pong with Envoy Gateway and inflates the
   apiserver write rate in steady state.
-- **Cut "time-to-stable-status" for N=1000 to ≤30s** on Layer 2.
-  *Why:* clears the next-worst bench peer (NGF, 29s) — we stop
-  being the outlier.
+- **Cut "time-to-stable-status" for N=1000 to ≤30s** on the kind
+  harness. *Why:* clears the next-worst bench peer (NGF, 29s) — we
+  stop being the outlier.
 
 ### Correctness invariants (must not regress)
 
@@ -173,75 +177,11 @@ unaffected.
 
 ## 4. Reproduction & measurement
 
-Two layers; both built **before** any production code changes.
+One harness, built **before** any production code changes: a
+kind-based end-to-end script that drives Traefik installed from the
+upstream Helm chart with the bench's `install/basic.sh` values.
 
-### 4.1 Layer 1 — in-process micro-bench (primary tool)
-
-Location: `pkg/provider/kubernetes/gateway/perf_test.go` (and a small
-shared harness in `pkg/provider/kubernetes/gateway/perfharness_test.go`).
-
-Tech:
-
-- `sigs.k8s.io/controller-runtime/pkg/envtest` — runs real `etcd` +
-  `kube-apiserver` binaries on localhost. Test-only dep (already a
-  transitive dep of the upstream Gateway API repo; verify before
-  pulling in).
-- The actual `kubernetesgateway.Provider` constructed exactly as
-  production does, against the envtest config.
-- Gateway API CRDs loaded from the `sigs.k8s.io/gateway-api` module's
-  YAML (we already depend on the module).
-
-What the harness does:
-
-1. Start envtest, install CRDs, create a namespace.
-2. Create a single `Gateway` + `GatewayClass` pointing at our controller.
-3. Construct the provider; start `Provide` against a captured
-   `configurationChan`.
-4. In a separate goroutine, create N HTTPRoutes at a configurable rate
-   (default: as fast as the apiserver accepts them, single-threaded).
-5. Watch the apiserver via a separate informer for HTTPRoute status
-   updates; record:
-   - Timestamp of each Route's first `Accepted=True` parent status.
-   - Total `UpdateStatus` API write count (counted by wrapping the
-     `clientWrapper` with an `*atomic.Int64` per kind, or by an
-     audit hook on the envtest apiserver — whichever is cleaner).
-   - Rebuild count and per-rebuild duration (via a small instrument
-     hook in `loadConfigurationFromGateways`).
-6. Wait until the apiserver has not seen a status write for X seconds
-   ("quiescence"). Report:
-   - Time-to-stable from "last route created".
-   - Total writes per kind.
-   - Number of rebuilds.
-   - Mean / p99 rebuild duration.
-   - Optional: CPU profile via `runtime/pprof` if a flag is set.
-
-What it is *not*:
-
-- Not a Go `Benchmark` function — wall-clock-dominated and dependent
-  on the apiserver, so `testing.B`'s iteration scaling is misleading.
-  It's an ordinary `Test*` function gated by a `-perf` flag, with a
-  configurable `N` (env var or test flag).
-- Not gated in CI. Manual invocation only:
-  `go test -run=TestStatusPerf -perf -routes=1000 ./pkg/provider/kubernetes/gateway/`
-
-Configurability:
-
-- `-routes=N` (default 1000) — total routes to create.
-- `-route-batch=N` (default 1) — routes created per `kubectl apply`
-  equivalent. Useful for separating "many events" from "many routes".
-- `-cpuprofile=path` — write pprof CPU profile.
-- `-quiescence=duration` (default 3s) — time-without-writes that
-  defines "stable".
-
-Instrumentation hooks needed (added in production code, but no-op when
-not wired):
-
-- `clientWrapper` exposes a `Metrics` struct with atomic counters per
-  `Update*Status` method. Compiled in always; cheap.
-- `Provider.loadConfigurationFromGateways` calls a `time.Now()` once at
-  entry/exit if a `rebuildHook` field is set (nil by default).
-
-### 4.2 Layer 2 — kind-based end-to-end script (final gate)
+### 4.1 Kind harness
 
 Location: `hack/perf/gateway-status-bench.sh` plus a small Go program
 under `hack/perf/cmd/loadgen/`.
@@ -249,29 +189,28 @@ under `hack/perf/cmd/loadgen/`.
 Script does:
 
 1. `kind create cluster --config hack/perf/kind.yaml`.
-2. `make image` to build a local Traefik image at the current HEAD,
-   then `kind load docker-image traefik:dev`.
+2. `make build-image` to build a local Traefik image at the current
+   HEAD, then `kind load docker-image traefik:dev`.
 3. Install Gateway API CRDs (`experimental-install.yaml`, pinned).
-4. `helm install traefik` with values from
-   `hack/perf/values.yaml` — minimal: one replica, `kubernetesGateway`
-   provider on, `ThrottleDuration=0` (matches the bench), default
-   resources.
+4. `helm install traefik` with values from `hack/perf/values.yaml` —
+   minimal: one replica, `kubernetesGateway` provider on,
+   `ThrottleDuration=0` (matches the bench), default resources.
 5. Run the loadgen: create one `GatewayClass`, one `Gateway`, then N
-   HTTPRoutes. Watch all HTTPRoutes' status; record same metrics as
-   Layer 1.
-6. Report.
+   HTTPRoutes. Watch all HTTPRoutes' status; record time-to-stable,
+   per-kind write counts, and the AttachedRoutes convergence series.
+6. Report (JSON).
 
 `hack/perf/kind.yaml` is a single-node kind config. Audit policy in
 `hack/perf/audit.yaml` enables logging of `update` verbs on
 `*.gateway.networking.k8s.io` for cross-checking the write count
 against what Traefik thinks it sent.
 
-Layer 2 is used **once before** the work starts (sanity-check that
-Layer 1 numbers track real-cluster numbers) and **once after** each
-material change to confirm the in-process numbers carry over. Not part
-of the iteration loop.
+Run before the work starts (to establish a baseline matching the
+upstream bench's regime) and again after each material change to
+confirm the rewrite holds up. It builds an image and creates a
+cluster, so it isn't part of the inner iteration loop.
 
-### 4.3 Conformance gate
+### 4.2 Conformance gate
 
 `make test-gateway-api-conformance` already exists. It runs the
 upstream Gateway API conformance suite. It is correctness-only — won't
@@ -288,21 +227,20 @@ Ordered, each independently shippable as a PR. Every step starts with
 
 Deliverables:
 
-- `pkg/provider/kubernetes/gateway/perf_test.go` (Layer 1).
-- `hack/perf/...` (Layer 2).
-- `clientWrapper` metrics counters (always-on, cheap).
-- `loadConfigurationFromGateways` timing hook (no-op unless set).
+- `hack/perf/...` — kind harness and loadgen.
 
 Exit criteria:
 
-- Layer 1 reproduces a "Traefik is slow at N=1000" result against
-  master, in seconds-to-minutes wall time on the developer's machine.
-- pprof flame graph captured and shared. We agree on **where the time
-  actually goes** before writing any production code.
+- The harness reproduces a "Traefik is slow at N=1000" result against
+  master on the developer's machine, in the same shape as the upstream
+  bench's published row (long flat AttachedRoutes plateau, then a
+  single jump to N at the very end).
+- We agree on **where the time actually goes** — status I/O serialised
+  on the rebuild goroutine — before writing any production code.
 
-If profiling shows the bottleneck is *not* status-update orchestration
-(e.g., it's hashing the configuration, or some other rebuild work), we
-revisit this whole spec.
+If the harness shows the bottleneck is *not* status-update
+orchestration (e.g., it's hashing the configuration, or some other
+rebuild work), we revisit this whole spec.
 
 ### Step 2 — Decouple status writes from the rebuild
 
@@ -467,9 +405,9 @@ Tests:
   writer goroutine to drain. Add a `WaitForStatusFlush(t)` helper.
 - A new test: enqueue two reports back-to-back; assert the second
   overwrites the first (only the second's content lands).
-- Layer 1 perf harness re-run: time-to-stable drops to comparable
-  numbers with NGF (29s for 1000 routes is the next-worst peer; aim
-  to clear that bar).
+- Kind harness re-run: time-to-stable drops to comparable numbers
+  with NGF (29s for 1000 routes is the next-worst peer; aim to clear
+  that bar).
 
 ### Step 3 — Bounded parallelism within the writer
 
@@ -544,8 +482,8 @@ Tests:
 - Add a race condition test: two reports with overlapping resources
   flushed back-to-back; assert no apiserver conflicts surface and
   final state matches the second report.
-- Layer 1 perf harness: time-to-stable improves further at N=1000,
-  and AttachedRoutes timestamp lands within the first 1/8 of the
+- Kind harness: time-to-stable improves further at N=1000, and
+  the AttachedRoutes timestamp lands within the first 1/8 of the
   flush wall time (i.e., is not pinned to the tail).
 - Failure-path test: stub `UpdateHTTPRouteStatus` to return a
   permanent error for one specific route; assert the warn log line
@@ -664,7 +602,8 @@ work-time investigation remain "open".
    No `throttleDuration` is set, so the provider runs with the
    zero-value default from `kubernetes.go:71` — i.e., no throttling.
    The O(N²) "one rebuild per route create" hypothesis is preserved.
-   Layer 2 must reproduce this: install Traefik with throttling off.
+   The kind harness must reproduce this: install Traefik with
+   throttling off.
 
 2. **Bench produces one informer event per route create (resolved).**
    Pulled `origin/v1:tests/attached-routes.sh` and
@@ -675,8 +614,8 @@ work-time investigation remain "open".
    - Creates are sequential, one apiserver request per route.
    - No batching; each create produces its own informer event.
 
-   Layer 1 should default to `-route-batch=1` to match. The flag
-   stays in the harness so we can later test "what if creates were
+   The kind harness defaults `--concurrency=1` to match. The flag
+   stays in the loadgen so we can later test "what if creates were
    batched" as a separate experiment.
 
 ### Still open
@@ -687,20 +626,21 @@ work-time investigation remain "open".
    `backendRef` and listener `certificateRef`) is not affected. To
    double-check during Step 4 implementation.
 
+
 ### Process
 
-4. **pprof artifacts are not committed.** Profiles captured from
-   Layer 1 are shared out-of-band (e.g., attached to the PR review
-   or pasted via flamegraph screenshot). Do not add `.pb.gz` files
-   to the branch. `hack/perf/` and any envtest harness output paths
-   should be gitignored.
+4. **Profiling artifacts are not committed.** Any profile captured
+   from a one-off run against the kind harness is shared out-of-band
+   (e.g., attached to the PR review or pasted via flamegraph
+   screenshot). Do not add `.pb.gz` files to the branch.
 
 ## 8. Deferred (TODO list, do not pursue now)
 
-- Wiring Layer 1 into CI as a perf budget. Today the budget would
-  be flaky (envtest startup variance dominates). Revisit if/when
-  envtest startup gets predictable, or when we have a stable
-  baseline for the post-rewrite numbers.
+- Wiring a perf-regression guard into CI. The kind harness is too
+  heavy for per-PR CI (builds an image, brings up a cluster). The
+  natural shape is a focused envtest unit test that asserts rebuild
+  wall time at N=small stays under a threshold after Step 2 lands;
+  defer until there's a stable post-rewrite baseline to gate on.
 - **Multi-replica Traefik (HA) leader election for status writes.**
   *What:* elect one replica to own status writes for a given
   Gateway; others compute reports but don't flush. *Why deferred:*
