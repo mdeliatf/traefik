@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -47,6 +48,34 @@ type clientWrapper struct {
 
 	labelSelector       string
 	experimentalChannel bool
+
+	metrics clientMetrics
+}
+
+// clientMetrics counts successful apiserver status writes performed by
+// clientWrapper.Update*Status. Increments happen only after a write is
+// actually flushed to the apiserver, so no-op equality short-circuits and
+// conflict-retried attempts do not inflate the totals.
+type clientMetrics struct {
+	gatewayClassUpdates     atomic.Int64
+	gatewayUpdates          atomic.Int64
+	httpRouteUpdates        atomic.Int64
+	grpcRouteUpdates        atomic.Int64
+	tcpRouteUpdates         atomic.Int64
+	tlsRouteUpdates         atomic.Int64
+	backendTLSPolicyUpdates atomic.Int64
+}
+
+// clientMetricsSnapshot is an immutable view of clientMetrics at a point
+// in time. Used by the perf harness to compute deltas across a run.
+type clientMetricsSnapshot struct {
+	GatewayClassUpdates     int64
+	GatewayUpdates          int64
+	HTTPRouteUpdates        int64
+	GRPCRouteUpdates        int64
+	TCPRouteUpdates         int64
+	TLSRouteUpdates         int64
+	BackendTLSPolicyUpdates int64
 }
 
 func createClientFromConfig(c *rest.Config) (*clientWrapper, error) {
@@ -454,6 +483,7 @@ func (c *clientWrapper) UpdateGatewayClassStatus(ctx context.Context, name strin
 			return err
 		}
 
+		c.metrics.gatewayClassUpdates.Add(1)
 		return nil
 	})
 	if err != nil {
@@ -489,6 +519,7 @@ func (c *clientWrapper) UpdateGatewayStatus(ctx context.Context, gateway ktypes.
 			return err
 		}
 
+		c.metrics.gatewayUpdates.Add(1)
 		return nil
 	})
 	if err != nil {
@@ -540,6 +571,7 @@ func (c *clientWrapper) UpdateHTTPRouteStatus(ctx context.Context, route ktypes.
 			return err
 		}
 
+		c.metrics.httpRouteUpdates.Add(1)
 		return nil
 	})
 	if err != nil {
@@ -591,6 +623,7 @@ func (c *clientWrapper) UpdateGRPCRouteStatus(ctx context.Context, route ktypes.
 			return err
 		}
 
+		c.metrics.grpcRouteUpdates.Add(1)
 		return nil
 	})
 	if err != nil {
@@ -642,6 +675,7 @@ func (c *clientWrapper) UpdateTCPRouteStatus(ctx context.Context, route ktypes.N
 			return err
 		}
 
+		c.metrics.tcpRouteUpdates.Add(1)
 		return nil
 	})
 	if err != nil {
@@ -693,6 +727,7 @@ func (c *clientWrapper) UpdateTLSRouteStatus(ctx context.Context, route ktypes.N
 			return err
 		}
 
+		c.metrics.tlsRouteUpdates.Add(1)
 		return nil
 	})
 	if err != nil {
@@ -747,6 +782,7 @@ func (c *clientWrapper) UpdateBackendTLSPolicyStatus(ctx context.Context, policy
 			return err
 		}
 
+		c.metrics.backendTLSPolicyUpdates.Add(1)
 		return nil
 	})
 	if err != nil {
@@ -754,6 +790,18 @@ func (c *clientWrapper) UpdateBackendTLSPolicyStatus(ctx context.Context, policy
 	}
 
 	return nil
+}
+
+func (c *clientWrapper) snapshotMetrics() clientMetricsSnapshot {
+	return clientMetricsSnapshot{
+		GatewayClassUpdates:     c.metrics.gatewayClassUpdates.Load(),
+		GatewayUpdates:          c.metrics.gatewayUpdates.Load(),
+		HTTPRouteUpdates:        c.metrics.httpRouteUpdates.Load(),
+		GRPCRouteUpdates:        c.metrics.grpcRouteUpdates.Load(),
+		TCPRouteUpdates:         c.metrics.tcpRouteUpdates.Load(),
+		TLSRouteUpdates:         c.metrics.tlsRouteUpdates.Load(),
+		BackendTLSPolicyUpdates: c.metrics.backendTLSPolicyUpdates.Load(),
+	}
 }
 
 // lookupNamespace returns the lookup namespace listenerKey for the given namespace.

@@ -20,3 +20,8 @@ plugins-local/
 traefik_changelog.md
 integration/tailscale.secret
 integration/gateway-api-conformance-reports/**/experimental-dev-default-report.yaml
+
+# Go test binaries and pprof artifacts produced by `go test -cpuprofile=...`.
+*.test
+*.pprof
+*.pb.gz
