@@ -2,8 +2,10 @@
 
 Branch: `fix/gateway-api-hackathon`
 Package: `pkg/provider/kubernetes/gateway/`
-Owner: Massimiliano D'Elia (assisted by Claude)
-Status: draft — not yet implemented
+Status: Step 1 landed (Layer 1 + Layer 2 + instrumentation). Step 1
+findings — measured results, harness runbook, what's confirmed vs not —
+are in [`gateway_status_async_findings.md`](./gateway_status_async_findings.md).
+Steps 2 and 3 are validated by the data and ready to implement.
 
 ## 1. Context
 
@@ -64,6 +66,13 @@ Inside `clientWrapper.UpdateXxxStatus`:
    works; the cost is upstream of the write.
 
 ### What we believe the cost actually is
+
+> **Status:** this section is the **pre-measurement hypothesis** that
+> motivated the harness in §4. The measured truth is recorded in
+> [`gateway_status_async_findings.md`](./gateway_status_async_findings.md)
+> — in short, status I/O (97% of rebuild wall time under burst load) is
+> the dominant cost, not O(N²) iteration. The bullets below are kept as
+> a record of the reasoning that led to the harness design.
 
 Because dedup works, the API writes themselves can't account for 180s.
 The hypothesis (to be verified by profiling, see §4) is:

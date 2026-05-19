@@ -1,0 +1,36 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+# Single-node kind cluster for the gateway-status perf benchmark.
+# Audit policy is mounted into the apiserver so writes to
+# *.gateway.networking.k8s.io can be cross-checked against the loadgen's
+# own counts. The audit log lives inside the node at
+# /var/log/kubernetes/audit/audit.log and is extracted via `docker cp` by
+# gateway-status-bench.sh.
+
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: ./hack/perf/audit.yaml
+        containerPath: /etc/kubernetes/policies/audit.yaml
+        readOnly: true
+    kubeadmConfigPatches:
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            audit-policy-file: /etc/kubernetes/policies/audit.yaml
+            audit-log-path: /var/log/kubernetes/audit/audit.log
+            audit-log-maxage: "0"
+            audit-log-maxsize: "0"
+          extraVolumes:
+            - name: audit-policy
+              hostPath: /etc/kubernetes/policies/audit.yaml
+              mountPath: /etc/kubernetes/policies/audit.yaml
+              readOnly: true
+              pathType: File
+            - name: audit-log
+              hostPath: /var/log/kubernetes/audit
+              mountPath: /var/log/kubernetes/audit
+              readOnly: false
+              pathType: DirectoryOrCreate

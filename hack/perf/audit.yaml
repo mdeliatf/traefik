@@ -1,0 +1,26 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+
+# Minimal audit policy for the gateway-status perf benchmark.
+#
+# Logs every write verb (create/update/patch/delete) that touches a status
+# subresource under gateway.networking.k8s.io at the Metadata level. This is
+# enough to cross-check the loadgen's per-kind write counts; we deliberately
+# omit RequestResponse-level bodies to keep the audit log small at N=1000.
+omitStages:
+  - RequestReceived
+
+rules:
+  - level: Metadata
+    verbs: ["create", "update", "patch", "delete"]
+    resources:
+      - group: gateway.networking.k8s.io
+        resources:
+          - gateways/status
+          - gatewayclasses/status
+          - httproutes/status
+          - grpcroutes/status
+          - tcproutes/status
+          - tlsroutes/status
+          - backendtlspolicies/status
+  - level: None

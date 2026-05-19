@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +30,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	gatev1 "sigs.k8s.io/gateway-api/apis/v1"
+	gateclientset "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
+	gateinformers "sigs.k8s.io/gateway-api/pkg/client/informers/externalversions"
 )
 
 // crdDir is the on-disk location of the vendored Gateway API CRDs relative
@@ -207,22 +212,162 @@ func waitForQuiescence(ctx context.Context, signal <-chan struct{}, window time.
 
 // summary aggregates per-kind write counts and rebuild stats for reporting.
 type perfSummary struct {
-	Routes       int
-	TimeToStable time.Duration
-	Writes       clientMetricsSnapshot
-	RebuildCount int
-	RebuildMean  time.Duration
-	RebuildP99   time.Duration
-	RebuildMax   time.Duration
+	Routes         int
+	Concurrency    int
+	CreateDuration time.Duration
+	// SetupTime mirrors the bench's "Setup time" column: time from
+	// "last route created" to "Gateway.AttachedRoutes == N".
+	SetupTime           time.Duration
+	TimeToAttachedN     time.Duration
+	TimeToStable        time.Duration
+	GatewayStatusWrites int
+	Writes              clientMetricsSnapshot
+	RebuildCount        int
+	RebuildMean         time.Duration
+	RebuildP99          time.Duration
+	RebuildMax          time.Duration
 }
 
 func (s perfSummary) String() string {
+	var totalRebuild time.Duration
+	if s.RebuildCount > 0 {
+		totalRebuild = s.RebuildMean * time.Duration(s.RebuildCount)
+	}
+	ioShare := "n/a"
+	if totalRebuild > 0 {
+		ioShare = fmt.Sprintf("%.0f%%", float64(s.Writes.StatusIOTime)/float64(totalRebuild)*100)
+	}
 	return fmt.Sprintf(
-		"routes=%d timeToStable=%s rebuilds=%d (mean=%s p99=%s max=%s) writes={gatewayClass=%d gateway=%d httpRoute=%d grpcRoute=%d tcpRoute=%d tlsRoute=%d backendTLSPolicy=%d}",
-		s.Routes, s.TimeToStable.Round(time.Millisecond),
+		"routes=%d concurrency=%d createDuration=%s setupTime=%s timeToAttachedN=%s timeToStable=%s gatewayStatusSamples=%d rebuilds=%d (mean=%s p99=%s max=%s totalRebuild=%s statusIO=%s ioShare=%s) writes={gatewayClass=%d gateway=%d httpRoute=%d grpcRoute=%d tcpRoute=%d tlsRoute=%d backendTLSPolicy=%d}",
+		s.Routes, s.Concurrency,
+		s.CreateDuration.Round(time.Millisecond), s.SetupTime.Round(time.Millisecond),
+		s.TimeToAttachedN.Round(time.Millisecond), s.TimeToStable.Round(time.Millisecond), s.GatewayStatusWrites,
 		s.RebuildCount, s.RebuildMean.Round(time.Millisecond), s.RebuildP99.Round(time.Millisecond), s.RebuildMax.Round(time.Millisecond),
+		totalRebuild.Round(time.Millisecond), s.Writes.StatusIOTime.Round(time.Millisecond), ioShare,
 		s.Writes.GatewayClassUpdates, s.Writes.GatewayUpdates, s.Writes.HTTPRouteUpdates,
 		s.Writes.GRPCRouteUpdates, s.Writes.TCPRouteUpdates, s.Writes.TLSRouteUpdates,
 		s.Writes.BackendTLSPolicyUpdates,
 	)
+}
+
+// gatewayAttachedRoutesWatcher mirrors what the upstream Howard John bench
+// records: every distinct value of Gateway.Status.Listeners[0].AttachedRoutes
+// observed via an informer after a configurable start time. The bench's
+// primary signal — time to reach AttachedRoutes==N — is read off this
+// watcher in perf_test.go.
+type gatewayAttachedRoutesWatcher struct {
+	mu      sync.Mutex
+	start   time.Time
+	last    int
+	samples []attachedSample
+	reached chan int
+}
+
+type attachedSample struct {
+	Offset         time.Duration
+	AttachedRoutes int
+}
+
+func newGatewayAttachedRoutesWatcher(t *testing.T, gw gateclientset.Interface, namespace, name string) *gatewayAttachedRoutesWatcher {
+	t.Helper()
+	ctx := t.Context()
+
+	w := &gatewayAttachedRoutesWatcher{
+		reached: make(chan int, 1),
+	}
+
+	factory := gateinformers.NewSharedInformerFactoryWithOptions(gw, 0, gateinformers.WithNamespace(namespace))
+	informer := factory.Gateway().V1().Gateways().Informer()
+
+	onEvent := func(obj any) {
+		gateway, ok := obj.(*gatev1.Gateway)
+		if !ok || gateway.Name != name {
+			return
+		}
+		if len(gateway.Status.Listeners) == 0 {
+			return
+		}
+		w.observe(int(gateway.Status.Listeners[0].AttachedRoutes))
+	}
+	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    onEvent,
+		UpdateFunc: func(_, obj any) { onEvent(obj) },
+	})
+	require.NoError(t, err)
+
+	factory.Start(ctx.Done())
+	for typ, ok := range factory.WaitForCacheSync(ctx.Done()) {
+		require.Truef(t, ok, "Gateway informer cache failed to sync: %s", typ)
+	}
+	return w
+}
+
+// SetStart resets the watcher: from this point on every distinct
+// AttachedRoutes value is appended as a sample, with an offset relative to
+// `t`.
+func (w *gatewayAttachedRoutesWatcher) SetStart(t time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.start = t
+	w.last = -1
+	w.samples = nil
+}
+
+// WaitForN blocks until AttachedRoutes is observed to be >= want or the
+// timeout elapses. Returns the offset (relative to SetStart) of the
+// qualifying sample.
+func (w *gatewayAttachedRoutesWatcher) WaitForN(ctx context.Context, want int, timeout time.Duration) (time.Duration, error) {
+	w.mu.Lock()
+	if w.last >= want && len(w.samples) > 0 {
+		off := w.samples[len(w.samples)-1].Offset
+		w.mu.Unlock()
+		return off, nil
+	}
+	w.mu.Unlock()
+
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-deadline.C:
+			return 0, fmt.Errorf("AttachedRoutes did not reach %d within %s", want, timeout)
+		case v := <-w.reached:
+			if v >= want {
+				w.mu.Lock()
+				off := w.samples[len(w.samples)-1].Offset
+				w.mu.Unlock()
+				return off, nil
+			}
+		}
+	}
+}
+
+// SampleCount returns the number of distinct AttachedRoutes values
+// recorded — i.e. the number of Gateway-status writes the apiserver
+// observed since SetStart.
+func (w *gatewayAttachedRoutesWatcher) SampleCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.samples)
+}
+
+func (w *gatewayAttachedRoutesWatcher) observe(attached int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.start.IsZero() || attached == w.last {
+		return
+	}
+	w.last = attached
+	w.samples = append(w.samples, attachedSample{
+		Offset:         time.Since(w.start),
+		AttachedRoutes: attached,
+	})
+
+	select {
+	case w.reached <- attached:
+	default:
+	}
 }

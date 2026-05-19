@@ -25,3 +25,4 @@ integration/gateway-api-conformance-reports/**/experimental-dev-default-report.y
 *.test
 *.pprof
 *.pb.gz
+loadgen

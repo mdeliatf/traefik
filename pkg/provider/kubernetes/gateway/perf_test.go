@@ -93,11 +93,24 @@ func TestStatusPerf(t *testing.T) {
 	// apiserver kicks the signal channel; we use it for quiescence detection.
 	statusSignal := newHTTPRouteStatusSignal(t, gwClient, perfNamespace)
 
-	// Create N routes one at a time.
+	// Wire the Gateway AttachedRoutes watcher — this is the bench's primary
+	// signal (`tests/attachedroutes/attachedroutes.go` in
+	// howardjohn/gateway-api-bench).
+	gwWatcher := newGatewayAttachedRoutesWatcher(t, gwClient, perfNamespace, perfGateway)
+
+	// Create N routes. -route-batch == 1 (default) matches the upstream
+	// bench's sequential `pilot-load` loop; bumping it synthesizes the
+	// burst regime the bench observed on faster hardware.
 	tCreateStart := time.Now()
+	gwWatcher.SetStart(tCreateStart)
 	createPerfRoutes(t, gwClient, *perfRoutes, *perfRouteBatch)
 	tCreateDone := time.Now()
-	t.Logf("created %d routes in %s", *perfRoutes, tCreateDone.Sub(tCreateStart).Round(time.Millisecond))
+	createDuration := tCreateDone.Sub(tCreateStart)
+	t.Logf("created %d routes in %s", *perfRoutes, createDuration.Round(time.Millisecond))
+
+	// Wait for Gateway.AttachedRoutes to reach N (bench's primary metric).
+	timeToAttachedN, err := gwWatcher.WaitForN(t.Context(), *perfRoutes, *perfQuiescence+5*time.Minute)
+	require.NoError(t, err, "AttachedRoutes never reached %d", *perfRoutes)
 
 	// Wait for the apiserver to go quiet on HTTPRoute status writes.
 	lastWrite, err := waitForQuiescence(t.Context(), statusSignal, *perfQuiescence)
@@ -110,9 +123,14 @@ func TestStatusPerf(t *testing.T) {
 	postRebuilds := *harness.rebuildDurations
 
 	summary := perfSummary{
-		Routes:       *perfRoutes,
-		TimeToStable: lastWrite.Sub(tCreateDone),
-		Writes:       diffMetrics(preWrites, postWrites),
+		Routes:              *perfRoutes,
+		Concurrency:         max(*perfRouteBatch, 1),
+		CreateDuration:      createDuration,
+		SetupTime:           max(timeToAttachedN-createDuration, 0),
+		TimeToAttachedN:     timeToAttachedN,
+		TimeToStable:        lastWrite.Sub(tCreateDone),
+		GatewayStatusWrites: gwWatcher.SampleCount(),
+		Writes:              diffMetrics(preWrites, postWrites),
 	}
 	summary.RebuildCount, summary.RebuildMean, summary.RebuildP99, summary.RebuildMax = rebuildStats(postRebuilds[preRebuilds:])
 
@@ -273,6 +291,7 @@ func diffMetrics(before, after clientMetricsSnapshot) clientMetricsSnapshot {
 		TCPRouteUpdates:         after.TCPRouteUpdates - before.TCPRouteUpdates,
 		TLSRouteUpdates:         after.TLSRouteUpdates - before.TLSRouteUpdates,
 		BackendTLSPolicyUpdates: after.BackendTLSPolicyUpdates - before.BackendTLSPolicyUpdates,
+		StatusIOTime:            after.StatusIOTime - before.StatusIOTime,
 	}
 }
 

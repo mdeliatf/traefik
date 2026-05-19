@@ -53,9 +53,11 @@ type clientWrapper struct {
 }
 
 // clientMetrics counts successful apiserver status writes performed by
-// clientWrapper.Update*Status. Increments happen only after a write is
-// actually flushed to the apiserver, so no-op equality short-circuits and
-// conflict-retried attempts do not inflate the totals.
+// clientWrapper.Update*Status and accumulates the wall time spent inside
+// the apiserver UpdateStatus calls themselves (statusIOTimeNs). Increments
+// happen only after a write is actually flushed to the apiserver, so no-op
+// equality short-circuits and conflict-retried attempts do not inflate the
+// totals.
 type clientMetrics struct {
 	gatewayClassUpdates     atomic.Int64
 	gatewayUpdates          atomic.Int64
@@ -64,6 +66,13 @@ type clientMetrics struct {
 	tcpRouteUpdates         atomic.Int64
 	tlsRouteUpdates         atomic.Int64
 	backendTLSPolicyUpdates atomic.Int64
+
+	// statusIOTimeNs accumulates time.Since around the successful
+	// csGateway.*.UpdateStatus(...) call (just the apiserver round-trip,
+	// not the equality check or DeepCopy that surround it). Compared
+	// against the rebuildHook total to answer "is status I/O the
+	// bottleneck".
+	statusIOTimeNs atomic.Int64
 }
 
 // clientMetricsSnapshot is an immutable view of clientMetrics at a point
@@ -76,6 +85,7 @@ type clientMetricsSnapshot struct {
 	TCPRouteUpdates         int64
 	TLSRouteUpdates         int64
 	BackendTLSPolicyUpdates int64
+	StatusIOTime            time.Duration
 }
 
 func createClientFromConfig(c *rest.Config) (*clientWrapper, error) {
@@ -477,7 +487,10 @@ func (c *clientWrapper) UpdateGatewayClassStatus(ctx context.Context, name strin
 		currentGatewayClass = currentGatewayClass.DeepCopy()
 		currentGatewayClass.Status = status
 
-		if _, err = c.csGateway.GatewayV1().GatewayClasses().UpdateStatus(ctx, currentGatewayClass, metav1.UpdateOptions{}); err != nil {
+		ioStart := time.Now()
+		_, err = c.csGateway.GatewayV1().GatewayClasses().UpdateStatus(ctx, currentGatewayClass, metav1.UpdateOptions{})
+		c.metrics.statusIOTimeNs.Add(int64(time.Since(ioStart)))
+		if err != nil {
 			// We have to return err itself here (not wrapped inside another error)
 			// so that RetryOnConflict can identify it correctly.
 			return err
@@ -513,7 +526,10 @@ func (c *clientWrapper) UpdateGatewayStatus(ctx context.Context, gateway ktypes.
 		currentGateway = currentGateway.DeepCopy()
 		currentGateway.Status = status
 
-		if _, err = c.csGateway.GatewayV1().Gateways(gateway.Namespace).UpdateStatus(ctx, currentGateway, metav1.UpdateOptions{}); err != nil {
+		ioStart := time.Now()
+		_, err = c.csGateway.GatewayV1().Gateways(gateway.Namespace).UpdateStatus(ctx, currentGateway, metav1.UpdateOptions{})
+		c.metrics.statusIOTimeNs.Add(int64(time.Since(ioStart)))
+		if err != nil {
 			// We have to return err itself here (not wrapped inside another error)
 			// so that RetryOnConflict can identify it correctly.
 			return err
@@ -565,7 +581,10 @@ func (c *clientWrapper) UpdateHTTPRouteStatus(ctx context.Context, route ktypes.
 			},
 		}
 
-		if _, err = c.csGateway.GatewayV1().HTTPRoutes(route.Namespace).UpdateStatus(ctx, currentRoute, metav1.UpdateOptions{}); err != nil {
+		ioStart := time.Now()
+		_, err = c.csGateway.GatewayV1().HTTPRoutes(route.Namespace).UpdateStatus(ctx, currentRoute, metav1.UpdateOptions{})
+		c.metrics.statusIOTimeNs.Add(int64(time.Since(ioStart)))
+		if err != nil {
 			// We have to return err itself here (not wrapped inside another error)
 			// so that RetryOnConflict can identify it correctly.
 			return err
@@ -617,7 +636,10 @@ func (c *clientWrapper) UpdateGRPCRouteStatus(ctx context.Context, route ktypes.
 			},
 		}
 
-		if _, err = c.csGateway.GatewayV1().GRPCRoutes(route.Namespace).UpdateStatus(ctx, currentRoute, metav1.UpdateOptions{}); err != nil {
+		ioStart := time.Now()
+		_, err = c.csGateway.GatewayV1().GRPCRoutes(route.Namespace).UpdateStatus(ctx, currentRoute, metav1.UpdateOptions{})
+		c.metrics.statusIOTimeNs.Add(int64(time.Since(ioStart)))
+		if err != nil {
 			// We have to return err itself here (not wrapped inside another error)
 			// so that RetryOnConflict can identify it correctly.
 			return err
@@ -669,7 +691,10 @@ func (c *clientWrapper) UpdateTCPRouteStatus(ctx context.Context, route ktypes.N
 			},
 		}
 
-		if _, err = c.csGateway.GatewayV1alpha2().TCPRoutes(route.Namespace).UpdateStatus(ctx, currentRoute, metav1.UpdateOptions{}); err != nil {
+		ioStart := time.Now()
+		_, err = c.csGateway.GatewayV1alpha2().TCPRoutes(route.Namespace).UpdateStatus(ctx, currentRoute, metav1.UpdateOptions{})
+		c.metrics.statusIOTimeNs.Add(int64(time.Since(ioStart)))
+		if err != nil {
 			// We have to return err itself here (not wrapped inside another error)
 			// so that RetryOnConflict can identify it correctly.
 			return err
@@ -721,7 +746,10 @@ func (c *clientWrapper) UpdateTLSRouteStatus(ctx context.Context, route ktypes.N
 			},
 		}
 
-		if _, err = c.csGateway.GatewayV1().TLSRoutes(route.Namespace).UpdateStatus(ctx, currentRoute, metav1.UpdateOptions{}); err != nil {
+		ioStart := time.Now()
+		_, err = c.csGateway.GatewayV1().TLSRoutes(route.Namespace).UpdateStatus(ctx, currentRoute, metav1.UpdateOptions{})
+		c.metrics.statusIOTimeNs.Add(int64(time.Since(ioStart)))
+		if err != nil {
 			// We have to return err itself here (not wrapped inside another error)
 			// so that RetryOnConflict can identify it correctly.
 			return err
@@ -776,7 +804,10 @@ func (c *clientWrapper) UpdateBackendTLSPolicyStatus(ctx context.Context, policy
 			Ancestors: ancestorStatuses,
 		}
 
-		if _, err = c.csGateway.GatewayV1().BackendTLSPolicies(policy.Namespace).UpdateStatus(ctx, currentPolicy, metav1.UpdateOptions{}); err != nil {
+		ioStart := time.Now()
+		_, err = c.csGateway.GatewayV1().BackendTLSPolicies(policy.Namespace).UpdateStatus(ctx, currentPolicy, metav1.UpdateOptions{})
+		c.metrics.statusIOTimeNs.Add(int64(time.Since(ioStart)))
+		if err != nil {
 			// We have to return err itself here (not wrapped inside another error)
 			// so that RetryOnConflict can identify it correctly.
 			return err
@@ -801,6 +832,7 @@ func (c *clientWrapper) snapshotMetrics() clientMetricsSnapshot {
 		TCPRouteUpdates:         c.metrics.tcpRouteUpdates.Load(),
 		TLSRouteUpdates:         c.metrics.tlsRouteUpdates.Load(),
 		BackendTLSPolicyUpdates: c.metrics.backendTLSPolicyUpdates.Load(),
+		StatusIOTime:            time.Duration(c.metrics.statusIOTimeNs.Load()),
 	}
 }
 

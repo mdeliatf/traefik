@@ -1,0 +1,53 @@
+# Helm values for the gateway-status perf benchmark.
+#
+# Mirrors the upstream Howard John bench install (origin/v1:install/basic.sh):
+# kubernetesGateway provider on, no throttling, single replica, default
+# resources. The image is built locally from HEAD via `make build-image`
+# and loaded into kind, so pullPolicy must be Never.
+
+image:
+  registry: docker.io
+  repository: traefik/traefik
+  # Semver-shaped dev tag applied by hack/perf/gateway-status-bench.sh
+  # to the locally built image. The chart's templates run semverCompare
+  # against this value: it rejects "latest" and enforces >= v3.6.0, so
+  # the major.minor here must track the master branch's release line.
+  tag: v3.7.0-perf
+  pullPolicy: Never
+
+deployment:
+  replicas: 1
+
+providers:
+  kubernetesGateway:
+    enabled: true
+  kubernetesCRD:
+    enabled: false
+  kubernetesIngress:
+    enabled: false
+
+# Disable the chart's bundled Gateway resource (which references an 8000
+# listener that we don't expose) — the loadgen creates its own Gateway.
+# Matches the upstream Howard John bench install (origin/v1:install/basic.sh).
+gateway:
+  enabled: false
+
+# Explicitly disable any throttling so the provider rebuilds on every
+# informer event — matches what the bench measured.
+additionalArguments:
+  - "--providers.kubernetesgateway.throttleduration=0"
+
+ports:
+  web:
+    port: 80
+  websecure:
+    port: 443
+
+podSecurityContext:
+  sysctls:
+    - name: net.ipv4.ip_unprivileged_port_start
+      value: "0"
+
+logs:
+  general:
+    level: INFO
