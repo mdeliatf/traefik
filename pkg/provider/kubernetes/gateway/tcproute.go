@@ -19,7 +19,7 @@ import (
 	gatev1alpha2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 )
 
-func (p *Provider) loadTCPRoutes(ctx context.Context, gatewayListeners []gatewayListener, conf *dynamic.Configuration) {
+func (p *Provider) loadTCPRoutes(ctx context.Context, gatewayListeners []gatewayListener, conf *dynamic.Configuration, report *statusReport) {
 	logger := log.Ctx(ctx)
 	routes, err := p.client.ListTCPRoutes()
 	if err != nil {
@@ -28,11 +28,6 @@ func (p *Provider) loadTCPRoutes(ctx context.Context, gatewayListeners []gateway
 	}
 
 	for _, route := range routes {
-		logger := log.Ctx(ctx).With().
-			Str("tcp_route", route.Name).
-			Str("namespace", route.Namespace).
-			Logger()
-
 		routeListeners := matchingGatewayListeners(gatewayListeners, route.Namespace, route.Spec.ParentRefs)
 		if len(routeListeners) == 0 {
 			continue
@@ -80,15 +75,10 @@ func (p *Provider) loadTCPRoutes(ctx context.Context, gatewayListeners []gateway
 			parentStatuses = append(parentStatuses, *parentStatus)
 		}
 
-		routeStatus := gatev1alpha2.TCPRouteStatus{
+		report.tcpRoutes[ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}] = gatev1alpha2.TCPRouteStatus{
 			RouteStatus: gatev1alpha2.RouteStatus{
 				Parents: parentStatuses,
 			},
-		}
-		if err := p.client.UpdateTCPRouteStatus(ctx, ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}, routeStatus); err != nil {
-			logger.Warn().
-				Err(err).
-				Msg("Unable to update TCPRoute status")
 		}
 	}
 }

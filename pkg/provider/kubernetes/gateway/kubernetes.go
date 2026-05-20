@@ -211,7 +211,7 @@ func (p *Provider) Provide(configurationChan chan<- dynamic.Message, pool *safe.
 					// Note that event is the *first* event that came in during this throttling interval -- if we're hitting our throttle, we may have dropped events.
 					// This is fine, because we don't treat different event types differently.
 					// But if we do in the future, we'll need to track more information about the dropped events.
-					conf := p.loadConfigurationFromGateways(ctxLog)
+					conf, report := p.loadConfigurationFromGateways(ctxLog)
 
 					confHash, err := hashstructure.Hash(conf, nil)
 					switch {
@@ -219,12 +219,22 @@ func (p *Provider) Provide(configurationChan chan<- dynamic.Message, pool *safe.
 						logger.Error().Msg("Unable to hash the configuration")
 					case p.lastConfiguration.Get() == confHash:
 						logger.Debug().Msgf("Skipping Kubernetes event kind %T", event)
+						// TODO: investigate why the status also needs to be flushed here.
+						p.flushStatusReport(ctxLog, report)
 					default:
 						p.lastConfiguration.Set(confHash)
+						// Publish the dynamic configuration before flushing status writes so the
+						// data plane starts serving new routes ahead of the apiserver round-trips.
 						configurationChan <- dynamic.Message{
 							ProviderName:  ProviderName,
 							Configuration: conf,
 						}
+
+						// Flush regardless of whether the dynamic configuration changed: the
+						// statusReport is independent of confHash and may carry writes even
+						// when the data plane has nothing new to consume (e.g. a GatewayClass
+						// that's now Accepted but has no Gateway pointing at it yet).
+						p.flushStatusReport(ctxLog, report)
 					}
 
 					// If we're throttling,
@@ -291,7 +301,8 @@ func (p *Provider) newK8sClient(ctx context.Context) (*clientWrapper, error) {
 }
 
 // TODO Handle errors and update resources statuses (gatewayClass, gateway).
-func (p *Provider) loadConfigurationFromGateways(ctx context.Context) *dynamic.Configuration {
+func (p *Provider) loadConfigurationFromGateways(ctx context.Context) (*dynamic.Configuration, *statusReport) {
+	report := newStatusReport()
 	conf := &dynamic.Configuration{
 		HTTP: &dynamic.HTTPConfiguration{
 			Routers:           map[string]*dynamic.Router{},
@@ -315,13 +326,13 @@ func (p *Provider) loadConfigurationFromGateways(ctx context.Context) *dynamic.C
 	addresses, err := p.gatewayAddresses()
 	if err != nil {
 		log.Ctx(ctx).Error().Err(err).Msg("Unable to get Gateway status addresses")
-		return nil
+		return nil, report
 	}
 
 	gatewayClasses, err := p.client.ListGatewayClasses()
 	if err != nil {
 		log.Ctx(ctx).Error().Err(err).Msg("Unable to list GatewayClasses")
-		return nil
+		return nil, report
 	}
 
 	var supportedFeatures []gatev1.SupportedFeature
@@ -352,13 +363,7 @@ func (p *Provider) loadConfigurationFromGateways(ctx context.Context) *dynamic.C
 			SupportedFeatures: supportedFeatures,
 		}
 
-		if err := p.client.UpdateGatewayClassStatus(ctx, gatewayClass.Name, status); err != nil {
-			log.Ctx(ctx).
-				Warn().
-				Err(err).
-				Str("gateway_class", gatewayClass.Name).
-				Msg("Unable to update GatewayClass status")
-		}
+		report.gatewayClasses[gatewayClass.Name] = status
 	}
 
 	var gateways []*gatev1.Gateway
@@ -379,14 +384,14 @@ func (p *Provider) loadConfigurationFromGateways(ctx context.Context) *dynamic.C
 		gatewayListeners = append(gatewayListeners, p.loadGatewayListeners(logger.WithContext(ctx), gateway, conf)...)
 	}
 
-	p.loadHTTPRoutes(ctx, gatewayListeners, conf)
+	p.loadHTTPRoutes(ctx, gatewayListeners, conf, report)
 
-	p.loadGRPCRoutes(ctx, gatewayListeners, conf)
+	p.loadGRPCRoutes(ctx, gatewayListeners, conf, report)
 
-	p.loadTLSRoutes(ctx, gatewayListeners, conf)
+	p.loadTLSRoutes(ctx, gatewayListeners, conf, report)
 
 	if p.ExperimentalChannel {
-		p.loadTCPRoutes(ctx, gatewayListeners, conf)
+		p.loadTCPRoutes(ctx, gatewayListeners, conf, report)
 	}
 
 	for _, gateway := range gateways {
@@ -417,14 +422,10 @@ func (p *Provider) loadConfigurationFromGateways(ctx context.Context) *dynamic.C
 				Msg("Gateway Not Accepted")
 		}
 
-		if err = p.client.UpdateGatewayStatus(ctx, ktypes.NamespacedName{Name: gateway.Name, Namespace: gateway.Namespace}, gatewayStatus); err != nil {
-			logger.Warn().
-				Err(err).
-				Msg("Unable to update Gateway status")
-		}
+		report.gateways[ktypes.NamespacedName{Name: gateway.Name, Namespace: gateway.Namespace}] = gatewayStatus
 	}
 
-	return conf
+	return conf, report
 }
 
 func (p *Provider) loadGatewayListeners(ctx context.Context, gateway *gatev1.Gateway, conf *dynamic.Configuration) []gatewayListener {

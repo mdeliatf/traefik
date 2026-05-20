@@ -18,7 +18,7 @@ import (
 	gatev1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-func (p *Provider) loadTLSRoutes(ctx context.Context, gatewayListeners []gatewayListener, conf *dynamic.Configuration) {
+func (p *Provider) loadTLSRoutes(ctx context.Context, gatewayListeners []gatewayListener, conf *dynamic.Configuration, report *statusReport) {
 	logger := log.Ctx(ctx)
 	routes, err := p.client.ListTLSRoutes()
 	if err != nil {
@@ -27,10 +27,6 @@ func (p *Provider) loadTLSRoutes(ctx context.Context, gatewayListeners []gateway
 	}
 
 	for _, route := range routes {
-		logger := log.Ctx(ctx).With().
-			Str("tls_route", route.Name).
-			Str("namespace", route.Namespace).Logger()
-
 		routeListeners := matchingGatewayListeners(gatewayListeners, route.Namespace, route.Spec.ParentRefs)
 		if len(routeListeners) == 0 {
 			continue
@@ -97,15 +93,10 @@ func (p *Provider) loadTLSRoutes(ctx context.Context, gatewayListeners []gateway
 			}
 		}
 
-		routeStatus := gatev1.TLSRouteStatus{
+		report.tlsRoutes[ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}] = gatev1.TLSRouteStatus{
 			RouteStatus: gatev1.RouteStatus{
 				Parents: parentStatuses,
 			},
-		}
-		if err := p.client.UpdateTLSRouteStatus(ctx, ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}, routeStatus); err != nil {
-			logger.Warn().
-				Err(err).
-				Msg("Unable to update TLSRoute status")
 		}
 	}
 }

@@ -7,36 +7,42 @@ Package: `pkg/provider/kubernetes/gateway/`
 dominant cause of Traefik's "100× the median" setup time on the
 upstream Gateway API bench is *not* the status-write ordering and not
 the rebuild architecture — it is **client-go's default rate limiter
-(QPS=5, Burst=10) throttling apiserver writes to ~5/s**. With the
-earlier async-decoupling design reverted and the client-side rate
-limiter disabled (`QPS=-1`), the bench numbers for N=1000 collapse to
-`setupTime=3.97s`, `timeToAttachedN=5.58s`, **`timeToQuiescence=3.97s`**
-on macOS Docker Desktop — better than every prior result here, and
-inside the median of upstream peers on much slower hardware. See
+(QPS=5, Burst=10) throttling apiserver writes to ~5/s**. With both
+Step 2 (client-side rate limiter disabled, `QPS=-1`) and Step 3
+(synchronous config-before-status reorder) landed, the bench numbers
+for N=1000 are `setupTime=98ms`, `timeToAttachedN=1.504s`,
+**`timeToQuiescence=2.789s`** on macOS Docker Desktop — better than
+every prior result here, ~1800× faster than the upstream bench's
+published Traefik row (180s), and squarely inside the median of the
+upstream peers on much slower hardware. See
 [`gateway_status_async_findings.md`](./gateway_status_async_findings.md)
-for the run output.
+§5d for the run output and the regression story across §5a–§5d.
 
 Implications for this spec:
 
-- **The QPS fix (now Step 2) is the dominant lever and is shipped
-  first.**
-- **The synchronous config-before-status reorder (now Step 3)** keeps
-  the one good idea from the earlier async-rewrite draft (publish
-  config to the configuration channel before status writes, so the
-  data plane is serving new routes before status confirms it) but
-  does it on the rebuild goroutine, with no queue and no writer
-  goroutine.
-- **The async writer-goroutine design (now Step 6) is dropped.** It
-  was solving a downstream symptom of the rate-limiter cap; once
-  Step 2 lifts the cap, the architecture earns nothing.
-  `timeToQuiescence` with that step alone was 197s; with Step 2 alone
-  it is 4s.
-- **Bounded writer parallelism (now Step 7) is dropped.** No peer
+- **The QPS fix (Step 2) is the dominant lever.** Landed in commit
+  `ae1a20b51`; collapses `timeToQuiescence` from 197s to ~4s by
+  itself. Everything else builds on top of it.
+- **The synchronous config-before-status reorder (Step 3) is the
+  bench-column win.** Landed. The rebuild now runs in memory only
+  (`statusReport` collects writes; no API calls) and `flushStatusReport`
+  drains in `GatewayClass → Gateway → routes → policies` order after
+  the config has been pushed to `configurationChan`. The Gateway
+  write — which the bench polls — is now the *first* status I/O after
+  the rebuild, so `AttachedRoutes==N` lands ~100ms after the last
+  route create instead of ~4s (§5c → §5d, a ~40× drop).
+- **The async writer-goroutine design (Step 6) is dropped.** It was
+  solving a downstream symptom of the rate-limiter cap; once Step 2
+  lifts the cap, the architecture earns nothing. `timeToQuiescence`
+  with that step alone was 197s; with Steps 2 + 3 it is 2.8s.
+- **Bounded writer parallelism (Step 7) is dropped.** No peer
   implementation does this; with QPS uncapped the floor is already
   `apiserver_round_trip × N`, which is a few seconds on a localhost
-  cluster.
+  cluster — well below the threshold where a worker pool would earn
+  its keep.
 
-Status: Step 1 landed (harness). Step 2 (QPS fix) is in flight.
+Status: Steps 1, 2, 3 landed. Step 4 (foreign-parent fix) and Step 5
+(cheap rebuild cleanups) still pending.
 
 **PR plan:** Steps 1, 2, 3, 5 ship together in one PR; Step 4
 (foreign-parent fix) ships separately in a follow-up PR. Steps 6 and 7
@@ -179,11 +185,12 @@ This is the basis for parking Step 3 (see §5).
   apiserver write rate in steady state.
 - **Cut "time-to-stable-status" for N=1000 to ≤30s** on the kind
   harness. *Why:* clears the next-worst bench peer (NGF, 29s) — we
-  stop being the outlier. **Achieved by Step 2 alone:** post-decoupling
-  burst-mode `setupTime=6.8s`, `timeToAttachedN=8.6s`. The remaining
-  `timeToQuiescence≈197s` (time until every per-route status settles)
-  is a separate, non-bench metric — see §5 Step 3 for why it is
-  parked, not pursued.
+  stop being the outlier. **Achieved with margin:** post-Steps-2+3
+  burst-mode (c=16, macOS Docker Desktop) `setupTime=98ms`,
+  `timeToAttachedN=1.504s`, **`timeToQuiescence=2.789s`** — ~10×
+  under target, ahead of every reported peer on the bench's table.
+  See [`gateway_status_async_findings.md`](./gateway_status_async_findings.md)
+  §5d.
 
 ### Correctness invariants (must not regress)
 

@@ -20,7 +20,7 @@ import (
 )
 
 // TODO: as described in the specification https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io%2fv1.GRPCRoute, we should check for hostname conflicts between HTTP and GRPC routes.
-func (p *Provider) loadGRPCRoutes(ctx context.Context, gatewayListeners []gatewayListener, conf *dynamic.Configuration) {
+func (p *Provider) loadGRPCRoutes(ctx context.Context, gatewayListeners []gatewayListener, conf *dynamic.Configuration, report *statusReport) {
 	routes, err := p.client.ListGRPCRoutes()
 	if err != nil {
 		log.Ctx(ctx).Error().Err(err).Msg("Unable to list GRPCRoutes")
@@ -87,15 +87,10 @@ func (p *Provider) loadGRPCRoutes(ctx context.Context, gatewayListeners []gatewa
 			parentStatuses = append(parentStatuses, *parentStatus)
 		}
 
-		status := gatev1.GRPCRouteStatus{
+		report.grpcRoutes[ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}] = gatev1.GRPCRouteStatus{
 			RouteStatus: gatev1.RouteStatus{
 				Parents: parentStatuses,
 			},
-		}
-		if err := p.client.UpdateGRPCRouteStatus(ctx, ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}, status); err != nil {
-			logger.Warn().
-				Err(err).
-				Msg("Unable to update GRPCRoute status")
 		}
 	}
 }

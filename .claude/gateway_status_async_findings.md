@@ -234,6 +234,58 @@ beats the §5b post-Step-2 number (3.97s vs 6.8s) even though Step 2's
 Gateway-first ordering trick is *not* applied here — the absence of
 throttling makes the ordering trick unnecessary at this N.
 
+### 5d. With Step 2 (QPS fix) + Step 3 (config-before-status reorder) landed
+
+```json
+{
+  "routes": 1000,
+  "concurrency": 16,
+  "createDuration": "1.406s",
+  "setupTime": "98ms",
+  "timeToAttachedN": "1.504s",
+  "timeToQuiescence": "2.789s",
+  "gatewayStatusWrites": 3,
+  "httpRouteEvents": 2000,
+  "attachedSeries": [
+    {"offsetMs": 56,   "attachedRoutes": 2},
+    {"offsetMs": 351,  "attachedRoutes": 86},
+    {"offsetMs": 1504, "attachedRoutes": 1000}
+  ]
+}
+```
+audit log: 1006 status updates.
+
+**What this shows.** `setupTime` — the bench column — drops from
+3.97s (§5c) to **98ms**, a ~40× improvement on the same hardware,
+same concurrency, same N. The cause is structural, not just noise:
+
+- In §5c the rebuild walked routes and wrote each route's status
+  inline, then wrote Gateway status *last*. The rebuild couldn't
+  return — and Provide couldn't push the new config — until all ~1000
+  per-route round-trips had drained. `AttachedRoutes` only ticked to N
+  once that whole sequence finished.
+- In §5d the rebuild runs in memory only (`statusReport` is populated
+  but no API calls happen); `loadConfigurationFromGateways` returns in
+  µs. `Provide` pushes the config to `configurationChan` immediately,
+  then `flushStatusReport` walks the report in **GatewayClass → Gateway
+  → routes → policies** order. The Gateway write — which the bench
+  polls — is the *first* status I/O after the rebuild, not the last,
+  so `AttachedRoutes==N` lands ~100ms after the final route create.
+
+`timeToQuiescence` also improves (3.97s → 2.789s); part of that is
+run-to-run noise on `createDuration` (1.6s → 1.4s) but the rest is
+that the flush is no longer interleaved with rebuild work — it's a
+straight sequential drain at uncapped QPS, bounded only by apiserver
+round-trip latency. `gatewayStatusWrites=3` and the 3-tick
+`attachedSeries` (2 → 86 → 1000) confirm the 1-slot eventCh drop and
+the post-rebuild hash dedup are still coalescing the burst into a
+small handful of rebuilds, each producing one Gateway write.
+
+audit log holds at 1006 writes — basically `1000 HTTPRoutes + 3
+Gateway + 2 GatewayClass + 1 BackendTLSPolicy` — so the lean
+write count from §5c is preserved. We are not buying speed by
+writing more.
+
 ## 6. Conclusion — what the rebuild-vs-IO split looked like
 
 **Pre any fix:** Status I/O serialised on the rebuild goroutine is the
@@ -279,19 +331,22 @@ framing as the right perf fix (now spec Steps 6 and 7, dropped):
 
 ## 7. Recommended next steps (updated)
 
-1. **Land Step 2 (QPS fix).** Single-line change in `client.go`
-   setting `c.QPS = -1` and clearing `c.RateLimiter`. This is the
-   dominant lever and is independently shippable.
-2. **Land Step 3 (synchronous config-before-status reorder).** Same
-   goroutine, no queue, no writer goroutine; just collect statuses
-   during the rebuild into a `*statusReport` and flush after the
-   dynamic config has been sent to `configurationChan`. Improves
-   perceived data-plane update latency without adding complexity.
+1. ~~**Land Step 2 (QPS fix).**~~ Landed (commit
+   `ae1a20b51`); §5c → §5d confirm no regression.
+2. ~~**Land Step 3 (synchronous config-before-status reorder).**~~
+   Landed; §5d shows a 40× drop in `setupTime` vs §5c on the same
+   harness, same hardware, same N. The rebuild is now in-memory only;
+   `flushStatusReport` walks the report in `GatewayClass → Gateway →
+   routes → policies` order after the config has been published, so
+   `AttachedRoutes==N` lands inside ~100ms of the last route create.
 3. **Land Step 4 (foreign-parent filter).** Independent of perf; gate
-   on `make test-gateway-api-conformance`.
-4. Re-run the harness after the Step 2 PR and again after the Step 3
-   PR. Append numbers as §5d, §5e. Step 3 should not regress §5c
-   numbers; if it does, investigate before merging.
+   on `make test-gateway-api-conformance`. Ships in its own PR per the
+   spec's PR plan.
+4. Re-run the harness if you touch anything in the rebuild or flush
+   path. Append numbers as §5e, §5f. A regression vs §5d on the same
+   hardware and concurrency is a red flag — `setupTime > ~200ms` or
+   `timeToQuiescence > ~4s` indicates the data-plane / status-write
+   ordering broke.
 
 ## 8. What is *not* validated
 
