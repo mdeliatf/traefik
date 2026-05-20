@@ -50,6 +50,10 @@ type clientWrapper struct {
 }
 
 func createClientFromConfig(c *rest.Config) (*clientWrapper, error) {
+	// Disable client-side rate limiting; rely on apiserver API Priority and Fairness.
+	c.QPS = -1
+	c.RateLimiter = nil
+
 	csGateway, err := gateclientset.NewForConfig(c)
 	if err != nil {
 		return nil, err

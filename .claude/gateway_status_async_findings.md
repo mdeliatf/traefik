@@ -175,56 +175,127 @@ audit log: 1006 status updates.
 much slower hardware, with the same shape: a small initial burst, a
 long flat-line, then a single jump to N at the very end.
 
-## 6. Conclusion — what is confirmed
+### 5b. After the (now-dropped) async writer goroutine + Gateway-first ordering design, no QPS fix
 
-**Status I/O serialised on the rebuild goroutine is the bottleneck
-under burst load.** The burst run is the definitive evidence:
+```json
+{
+  "routes": 1000,
+  "concurrency": 16,
+  "createDuration": "1.783s",
+  "setupTime": "6.806s",
+  "timeToAttachedN": "8.589s",
+  "timeToQuiescence": "3m16.999s",
+  "gatewayStatusWrites": 3,
+  "httpRouteEvents": 2000,
+  "attachedSeries": [
+    {"offsetMs": 44,   "attachedRoutes": 1},
+    {"offsetMs": 154,  "attachedRoutes": 49},
+    {"offsetMs": 8589, "attachedRoutes": 1000}
+  ]
+}
+```
+audit log: 1006 status updates.
 
-- The audit log records ~1000 status updates landing on the apiserver
-  over the 197s setupTime window.
-- The loadgen sees `AttachedRoutes` tick only 3 times in the same
-  window (1 → 20 → 1000), with a flat stretch between offsetMs=2591
-  and offsetMs=198800.
+**What this shows.** The bench column (`setupTime`) drops 29× because
+the Gateway-status write is now the *first* thing in the post-rebuild
+flush — but `timeToQuiescence` stays at 197s because the per-route
+writes still drain at 1 per 200ms, throttled by client-go's default
+QPS=5 token bucket. Step 2 was solving the wrong problem.
 
-The only way to produce that shape is the Gateway-status write being
-stuck at the end of a long, serialised drain of per-route status writes
-on the single rebuild goroutine. Route translation, hashing, lister
-Gets, and equality compares run *between* writes, so they cannot
-account for the 197s gap on their own — the apiserver round-trips do.
+### 5c. With QPS fix alone (`QPS=-1`), async design reverted
 
-**This validates §2 (decouple status writes from the rebuild) and §3
-(bounded parallelism in the writer)** of the spec:
+```json
+{
+  "routes": 1000,
+  "concurrency": 16,
+  "createDuration": "1.605s",
+  "setupTime": "3.973s",
+  "timeToAttachedN": "5.578s",
+  "timeToQuiescence": "3.974s",
+  "gatewayStatusWrites": 4,
+  "httpRouteEvents": 2000,
+  "attachedSeries": [
+    {"offsetMs": 161,  "attachedRoutes": 2},
+    {"offsetMs": 1185, "attachedRoutes": 21},
+    {"offsetMs": 4311, "attachedRoutes": 696},
+    {"offsetMs": 5578, "attachedRoutes": 1000}
+  ]
+}
+```
+audit log: 1008 status updates.
 
-- §2 moves the I/O off the rebuild critical path. The rebuild becomes
-  in-memory work + an enqueue. The dynamic config gets reloaded almost
-  immediately. The provider can keep up with the event rate.
-- §3 lets the writer parallelise. With a worker pool of 8, the
-  apiserver writes that today take 197s sequentially would take
-  roughly 25s. With 16 workers, ~12s — within an order of magnitude
-  of Cilium's 1s (the rest of the gap is hardware).
+**What this shows.** With the client-side rate limiter disabled, the
+entire 1000-write drain finishes in ~4s on the same hardware where
+the pre-fix baseline was 197s. The convergence curve has four ticks
+across the burst (`attachedSeries`) rather than the long flat-line
+pattern, confirming that throughput is now bounded by apiserver
+round-trip latency, not by a client-side bucket. `setupTime` also
+beats the §5b post-Step-2 number (3.97s vs 6.8s) even though Step 2's
+Gateway-first ordering trick is *not* applied here — the absence of
+throttling makes the ordering trick unnecessary at this N.
 
-## 7. What is *not* validated
+## 6. Conclusion — what the rebuild-vs-IO split looked like
 
-- **Steps 4 and 5 remain independent of the perf chain.** Step 4
-  (foreign-parent fix) is a correctness item; the harness doesn't
-  cover it. Step 5 (cheap rebuild cleanups) only matters once
-  Step 2/3 have removed the I/O bulk — its return is currently ≈0.
-- **Multi-replica HA leader election** (spec §8) is still out of
-  scope; nothing here addresses it.
+**Pre any fix:** Status I/O serialised on the rebuild goroutine is the
+visible bottleneck. Audit log records ~1000 status updates landing on
+the apiserver over the 197s setupTime window; `AttachedRoutes` ticks
+only 3 times (1 → 20 → 1000) with a flat stretch between
+offsetMs=2591 and offsetMs=198800.
+
+What was wrong with the original framing: the *reason* the drain took
+197s was not the rebuild-goroutine coupling per se — it was that each
+write was rate-limited to 1 per 200ms by client-go's default token
+bucket (`QPS=5/Burst=10`). At ~5 writes/s, 1000 writes = ~200s, which
+matches the measurement to the second.
+
+Validated by the two follow-up runs (§5b, §5c):
+
+- **§5b — async writer-goroutine design alone, no QPS fix:**
+  `setupTime=6.8s`, `timeToAttachedN=8.6s`, **`timeToQuiescence=197s`**.
+  Moving the Gateway-status write to the front of the flush (which
+  the bench polls) dropped `setupTime` 29×, but the per-route status
+  drain — the work that closes `timeToQuiescence` — stayed at 197s,
+  because each write was still rate-limited at the client.
+- **§5c — QPS fix alone, async design reverted:** `setupTime=3.97s`,
+  `timeToAttachedN=5.58s`, **`timeToQuiescence=3.97s`**. With the rate
+  limiter out of the way, all 1000 writes drain in ~4s on macOS Docker
+  Desktop, and there is no need for the Gateway-first reorder to win
+  the bench column — the Gateway-status write naturally lands inside
+  that 4-second window too.
+
+This **refutes** the original "async decouple + writer parallelism"
+framing as the right perf fix (now spec Steps 6 and 7, dropped):
+
+- The async design was solving a downstream symptom of the
+  rate-limiter cap. With the cap removed, the architectural cost
+  (extra goroutine, lifecycle, latest-wins coalescing, test-only sync
+  helpers) earns almost nothing — that design alone leaves
+  `timeToQuiescence` at 197s, whereas QPS alone fixes it.
+- The worker-pool plan was justified by extrapolating "1000
+  sequential writes is unavoidable, so parallelise" — but the *only*
+  reason sequential 1000 writes took 197s was the bucket; at uncapped
+  QPS, 1000 sequential writes on a kind localhost cluster is ~4s,
+  well below the "parallel writer earns its keep" threshold.
+
+## 7. Recommended next steps (updated)
+
+1. **Land Step 2 (QPS fix).** Single-line change in `client.go`
+   setting `c.QPS = -1` and clearing `c.RateLimiter`. This is the
+   dominant lever and is independently shippable.
+2. **Land Step 3 (synchronous config-before-status reorder).** Same
+   goroutine, no queue, no writer goroutine; just collect statuses
+   during the rebuild into a `*statusReport` and flush after the
+   dynamic config has been sent to `configurationChan`. Improves
+   perceived data-plane update latency without adding complexity.
+3. **Land Step 4 (foreign-parent filter).** Independent of perf; gate
+   on `make test-gateway-api-conformance`.
+4. Re-run the harness after the Step 2 PR and again after the Step 3
+   PR. Append numbers as §5d, §5e. Step 3 should not regress §5c
+   numbers; if it does, investigate before merging.
+
+## 8. What is *not* validated
+
 - **CI integration of a perf-regression guard** (spec §8) is still
   deferred — the kind harness is too heavy for per-PR CI.
-
-## 8. Recommended next steps
-
-1. Implement §2 on a new branch. Re-run the kind harness at
-   `--concurrency 16`. Target: the long AttachedRoutes plateau
-   collapses; the provider keeps up with the event rate.
-2. Implement §3 (worker pool, default 8). Re-run with
-   `--concurrency 16`. Target: `setupTime` ≤ 30s at N=1000 on the
-   same kind cluster.
-3. Implement §4 (foreign-parent filter). Independent of perf; gate
-   on `make test-gateway-api-conformance`.
-4. Re-run the harness once after §2 lands and once after §3 lands.
-   Don't re-tune; we want apples-to-apples deltas. Append the new
-   numbers to §5 under a fresh sub-heading; keep the pre-§2 numbers
-   as the baseline.
+- **Multi-replica HA leader election** (spec §8) is still out of
+  scope; nothing here addresses it.

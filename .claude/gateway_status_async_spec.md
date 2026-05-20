@@ -1,11 +1,47 @@
-# Gateway API status updates — async rewrite spec
+# Gateway API status updates — rewrite spec
 
 Branch: `fix/gateway-api-hackathon`
 Package: `pkg/provider/kubernetes/gateway/`
-Status: Step 1 landed (kind-based perf harness under `hack/perf/`).
-Measurement runbook and observed numbers are in
-[`gateway_status_async_findings.md`](./gateway_status_async_findings.md).
-Steps 2 and 3 are validated by the data and ready to implement.
+
+**Headline finding (overrides earlier framing of this spec).** The
+dominant cause of Traefik's "100× the median" setup time on the
+upstream Gateway API bench is *not* the status-write ordering and not
+the rebuild architecture — it is **client-go's default rate limiter
+(QPS=5, Burst=10) throttling apiserver writes to ~5/s**. With the
+earlier async-decoupling design reverted and the client-side rate
+limiter disabled (`QPS=-1`), the bench numbers for N=1000 collapse to
+`setupTime=3.97s`, `timeToAttachedN=5.58s`, **`timeToQuiescence=3.97s`**
+on macOS Docker Desktop — better than every prior result here, and
+inside the median of upstream peers on much slower hardware. See
+[`gateway_status_async_findings.md`](./gateway_status_async_findings.md)
+for the run output.
+
+Implications for this spec:
+
+- **The QPS fix (now Step 2) is the dominant lever and is shipped
+  first.**
+- **The synchronous config-before-status reorder (now Step 3)** keeps
+  the one good idea from the earlier async-rewrite draft (publish
+  config to the configuration channel before status writes, so the
+  data plane is serving new routes before status confirms it) but
+  does it on the rebuild goroutine, with no queue and no writer
+  goroutine.
+- **The async writer-goroutine design (now Step 6) is dropped.** It
+  was solving a downstream symptom of the rate-limiter cap; once
+  Step 2 lifts the cap, the architecture earns nothing.
+  `timeToQuiescence` with that step alone was 197s; with Step 2 alone
+  it is 4s.
+- **Bounded writer parallelism (now Step 7) is dropped.** No peer
+  implementation does this; with QPS uncapped the floor is already
+  `apiserver_round_trip × N`, which is a few seconds on a localhost
+  cluster.
+
+Status: Step 1 landed (harness). Step 2 (QPS fix) is in flight.
+
+**PR plan:** Steps 1, 2, 3, 5 ship together in one PR; Step 4
+(foreign-parent fix) ships separately in a follow-up PR. Steps 6 and 7
+are dropped — kept in this spec only as a historical record of what
+we tried and why we backed it out.
 
 ## 1. Context
 
@@ -67,59 +103,61 @@ Inside `clientWrapper.UpdateXxxStatus`:
 
 ### What we believe the cost actually is
 
-> **Status:** this section is the **pre-measurement hypothesis** that
-> motivated the harness in §4. The measured truth is recorded in
-> [`gateway_status_async_findings.md`](./gateway_status_async_findings.md)
-> — in short, status I/O is the dominant cost (1000 status writes
-> serialised behind a single goroutine; the bench's AttachedRoutes
-> counter only ticks 3 times in 197s), not O(N²) iteration. The bullets
-> below are kept as a record of the reasoning that led to the harness
-> design.
+> **Status:** the measured truth is recorded in
+> [`gateway_status_async_findings.md`](./gateway_status_async_findings.md).
+> In short: **status I/O serialised behind the rebuild goroutine is the
+> dominant cost** (1000 status writes drained over 197s while the
+> AttachedRoutes counter only ticked 3 times). The original "O(N²)
+> per-event rebuild" framing was **wrong** — the 1-slot input channel
+> at `client.go:130` does a non-blocking send (`k8s/event_handler.go:34-39`)
+> and silently drops events that arrive while the consumer is mid-rebuild,
+> so a burst of N route creates does not produce N rebuilds. The
+> `attachedSeries` from the burst run shows only 3 ticks (1 → 49 →
+> 1000), consistent with a small handful of rebuilds, each visiting
+> the routes then-present in the lister cache.
 
-Because dedup works, the API writes themselves can't account for 180s.
-The hypothesis (to be verified by profiling, see §4) is:
+Confirmed contributors to the pre-Step-2 setupTime:
 
-- **Bench creates N routes one at a time.** Each `kubectl apply` is a
-  separate informer event. By default `ThrottleDuration=0` in the provider
-  (`kubernetes.go:71`), so each event triggers a full rebuild.
-- **Per rebuild, we iterate every route.** The k-th route create produces a
-  rebuild that visits all k previously-loaded routes plus the new one.
-  Aggregate work over N creates is O(N²).
-- **Inside the rebuild, every visited route does a lister `Get` and an
-  equality compare.** Cheap individually, but the rebuild blocks both the
-  dynamic-config send *and* the next event's processing.
-- **All of this happens on a single goroutine.** No parallelism.
-
-Profiling will confirm or refute this before we commit to the design.
+- Status writes are sequential on the rebuild goroutine — the apiserver
+  round-trips dominate, not in-process work.
+- Gateway status is written **last** in `loadConfigurationFromGateways`
+  (`kubernetes.go:430`), behind the per-route writes — the bench
+  measures `AttachedRoutes`, so it sees the tail.
+- Backend resolution inside `loadHTTPRoute` (`httproute.go:82`,
+  `kubernetes.go:881-968`) reads from the shared-informer indexed
+  caches; sub-µs per call. Not a meaningful contributor at N=1000.
 
 ### Reference implementation comparison
 
 Three projects were cited:
 
 - **kgateway** (`pkg/kgateway/proxy_syncer/status_syncer.go`): one
-  `utils.AsyncQueue[reports.ReportMap]`, latest-wins. The translator
-  enqueues a complete report. A dedicated goroutine in `Start(ctx)`
-  dequeues and calls `syncGatewayStatus`, `syncRouteStatus`,
-  `syncListenerSetStatus`, `syncPolicyStatus`. `retry-go` handles conflict
-  retries. Manager-level leader election gate.
+  `utils.AsyncQueue[reports.ReportMap]`, latest-wins. A dedicated
+  goroutine dequeues and calls `syncGatewayStatus`,
+  `syncListenerSetStatus`, `syncRouteStatus`, `syncPolicyStatus` in a
+  fixed Gateway-first order. **Each phase is a sequential `for` loop
+  over its resources** — no per-resource parallelism. `retry-go` handles
+  conflict retries.
 
 - **Contour** (`internal/status/cache.go`): the DAG processor builds a
-  `Cache` via accessor functions (`RouteConditionsAccessor` etc.) that
-  return a builder plus a commit closure. After DAG processing the cache
-  is flushed to the API by a separate `StatusUpdater`. Computation and
-  I/O are fully decoupled.
+  per-kind cache flushed by a separate `StatusUpdater` over a buffered
+  channel. **Single consumer goroutine; writes are sequential.** Routes
+  before gateways in the flush order. Computation and I/O are decoupled
+  but not parallelised.
 
 - **NGF** (`internal/controller/status/`,
   `internal/controller/handler.go:150`): a dedicated goroutine started
   with `go handler.waitForStatusUpdates(cfg.ctx)` is the only one that
-  calls `Updater.Update` (which is internally synchronous). Event loop
-  pushes to `statusQueue` and never blocks on the API. NGF's own
-  `updater.go` doc-comment admits the within-writer sequential calls are
-  a known issue (FIXME #1014).
+  calls `Updater.Update`. **Internally sequential** (`for`-loop with
+  exponential backoff). Routes-then-Gateway group ordering, motivated by
+  an IP-only fast path, not by AttachedRoutes-latency. NGF's
+  `updater.go` doc-comment acknowledges the sequential calls as a known
+  issue (FIXME #1014) but they have not changed it.
 
-All three share the **decouple-from-event-loop** step. They differ on
-whether they also parallelise within the writer (kgateway and Contour:
-yes; NGF: not yet).
+All three share the **decouple-from-event-loop** pattern. **None
+parallelise per-resource writes within the writer.** The earlier
+characterisation that "kgateway and Contour parallelise" was incorrect.
+This is the basis for parking Step 3 (see §5).
 
 ## 3. Goals & non-goals
 
@@ -141,7 +179,11 @@ yes; NGF: not yet).
   apiserver write rate in steady state.
 - **Cut "time-to-stable-status" for N=1000 to ≤30s** on the kind
   harness. *Why:* clears the next-worst bench peer (NGF, 29s) — we
-  stop being the outlier.
+  stop being the outlier. **Achieved by Step 2 alone:** post-decoupling
+  burst-mode `setupTime=6.8s`, `timeToAttachedN=8.6s`. The remaining
+  `timeToQuiescence≈197s` (time until every per-route status settles)
+  is a separate, non-bench metric — see §5 Step 3 for why it is
+  parked, not pursued.
 
 ### Correctness invariants (must not regress)
 
@@ -220,8 +262,8 @@ final gate before each PR in this series.
 
 ## 5. Plan of work
 
-Ordered, each independently shippable as a PR. Every step starts with
-"red test fails", except step 1 which is pure infrastructure.
+Ordered. PR grouping is in the headline. Every step starts with "red
+test fails", except Step 1 which is pure infrastructure.
 
 ### Step 1 — Build the harness, profile, agree on the bottleneck
 
@@ -242,260 +284,135 @@ If the harness shows the bottleneck is *not* status-update
 orchestration (e.g., it's hashing the configuration, or some other
 rebuild work), we revisit this whole spec.
 
-### Step 2 — Decouple status writes from the rebuild
+### Step 2 — Disable client-go's default rate limiter (THE perf fix)
 
-The heart of the perf rewrite. **One** status-writer goroutine fed by
-**one** 1-slot latest-wins channel of "status reports". Same shape as
-kgateway's `AsyncQueue[ReportMap]`.
+**Single-line change, dominant perf win, prerequisite for everything
+else.** All other steps in earlier drafts of this spec combined moved
+`setupTime` from 197s to 6.8s; this one moves it from 197s to 3.97s
+*with the old async-rewrite reverted*, and collapses
+`timeToQuiescence` from 197s to 3.97s.
 
-**Design decision — single global queue, not per-kind:**
-
-- The rebuild always reads complete state from listers and emits a
-  full `statusReport` covering every kind. There is no scenario where
-  a rebuild produces a partial report that needs to merge with an
-  older partial report from a different kind.
-- The K8s API treats each resource's `.status` as an independent
-  subresource. There is no ordering requirement between
-  `GatewayClass.status`, `Gateway.status`, and `*Route.status` — a
-  later route status update does not depend on an earlier gateway
-  status update having landed.
-- NGF's group-level partitioning (`groupGateways` vs
-  `groupAllExceptGateways`) exists because NGF runs multiple Gateway
-  *deployments* and routes gateway-specific updates differently from
-  the rest. Traefik has a single gateway provider with no such split,
-  so the driver for partitioning doesn't exist here.
-- A single queue keeps the latest-wins semantics trivially correct:
-  if rebuild N+1 arrives while N is still being flushed, replacing
-  the pending slot is safe because N+1 is a strict superset of N's
-  intent (both are full snapshots).
-- If profiling after Step 3 shows one slow kind starves the others
-  inside a single flush, the right answer is to parallelise within
-  the flush (already part of Step 3), not to split into per-kind
-  queues. We revisit only if that proves insufficient.
-
-**Coalescing & backpressure — latest-wins is per-key by construction:**
-
-The 1-slot replace channel and the full-snapshot `statusReport`
-together give per-key coalescing for free, with no separate
-`map[key]closure` dedup layer. Why this matters and why it's
-sufficient:
-
-- A burst of M rebuilds in quick succession enqueues at most 1
-  pending report at any time; all but the latest are dropped at the
-  slot. This is also the **natural backpressure mechanism**: the
-  queue can't grow unbounded because there is only ever one slot, so
-  a slow/wedged apiserver cannot make the producer memory-spike.
-- Each report is a complete snapshot computed from current lister
-  state, so dropping intermediate reports never loses information.
-  The next snapshot is the union of every dropped report's intent
-  (and possibly more). "Latest wins" is *strict*: dropping is
-  monotone in the staleness sense, not lossy.
-- Because the writer is single-goroutine and the next flush only
-  starts after the previous one returns, there are never two
-  concurrent in-flight writes to the same object (even with the
-  Step 3 worker pool, which parallelises *within* a flush). So
-  `RetryOnConflict` inside `UpdateXxxStatus` only ever races
-  against external writers (Envoy Gateway, manual `kubectl edit`)
-  — the same conditions it handles today. No new conflict modes
-  are introduced.
-- The per-object diff inside `UpdateXxxStatus` (`client.go:573`)
-  remains the final layer that suppresses no-op API calls when the
-  computed status equals the stored status. Unchanged by this
-  rewrite.
-
-**Write ordering within a flush — Gateway/GatewayClass first:**
-
-Within a single `flushStatusReport`, write `GatewayClass` and
-`Gateway` statuses *before* the route statuses. Why this rule
-exists:
-
-- The bench's setupTime metric polls
-  `Gateway.status.listeners[*].AttachedRoutes`. Current code writes
-  Gateway status at the very end of `loadConfigurationFromGateways`
-  (`kubernetes.go:430`), after all per-route writes — exactly why the
-  counter converges last today.
-- There is no API dependency in the reverse direction: a route's
-  status write does not require the Gateway's status to have landed
-  first. The K8s subresource API treats each as independent.
-- Once Step 3 (worker pool) lands, "ordering" becomes "priority
-  scheduling": Gateway/GatewayClass closures are submitted to the
-  worker pool ahead of route closures so they occupy the first
-  batch of workers, not the last. With a pool of 8 and K=1000
-  routes, this keeps the Gateway-status write off the tail of the
-  flush.
-
-**Shutdown — drop pending writes, do not drain:**
-
-When the writer's context is cancelled, any pending (un-flushed)
-report is dropped and an in-flight flush returns at the next
-per-resource closure boundary; in-flight apiserver calls are
-abandoned. Why drop, not drain:
-
-- Draining can block shutdown indefinitely if the apiserver is
-  slow, throttled, or unreachable. `Provide` is expected to return
-  promptly on context cancel; status I/O is best-effort and must
-  not gate teardown.
-- On restart, the provider re-runs
-  `loadConfigurationFromGateways` from scratch and produces the
-  same content from the listers — so dropping the in-flight report
-  costs at most one rebuild cycle of staleness, never permanent
-  loss.
-- The diff inside `UpdateXxxStatus` (`client.go:573`) means that if
-  a write *did* land before shutdown, the post-restart rebuild
-  will detect it as a no-op and skip the redundant API call. So we
-  don't pay for double-writes either.
-
-Data model — a `statusReport` is a snapshot of *all* statuses we
-intend to write after this rebuild:
+What:
 
 ```go
-type statusReport struct {
-    gatewayClasses    map[string]gatev1.GatewayClassStatus            // by name
-    gateways          map[ktypes.NamespacedName]gatev1.GatewayStatus
-    httpRoutes        map[ktypes.NamespacedName]gatev1.HTTPRouteStatus
-    grpcRoutes        map[ktypes.NamespacedName]gatev1.GRPCRouteStatus
-    tlsRoutes         map[ktypes.NamespacedName]gatev1.TLSRouteStatus
-    tcpRoutes         map[ktypes.NamespacedName]gatev1alpha2.TCPRouteStatus
-    backendTLSPolicies map[ktypes.NamespacedName]gatev1.PolicyStatus
+func createClientFromConfig(c *rest.Config) (*clientWrapper, error) {
+    c.QPS = -1
+    c.RateLimiter = nil
+    // ...rest unchanged
 }
 ```
 
-Producer side (the rebuild):
+Why `-1` and not "a big number":
 
-- `loadConfigurationFromGateways` no longer calls `client.Update*Status`.
-- The route loaders append to a `statusReport` instead. Existing
-  signatures change to accept a `*statusReport`.
-- After the rebuild ends and the configuration is hashed and queued,
-  `Provider.statusQueue.Submit(report)` is called.
-- `statusQueue` is a 1-slot replace channel: on submit, drop any
-  pending report and replace it with the new one. (Implementation:
-  `chan *statusReport` of buffer 1 with non-blocking send + drain.)
+- client-go's `rest.New` skips creating a token-bucket rate limiter
+  entirely when `QPS < 0` (see
+  `staging/src/k8s.io/client-go/rest/config.go`). Any positive value
+  still imposes bucket bookkeeping and a finite ceiling.
+- This is what controller-runtime does by default
+  (`pkg/client/config/config.go:101-104`): "Disable client-side
+  ratelimer by default, we can rely on API priority and fairness."
+  NGF inherits this through `ctlr.GetConfigOrDie()`; we got
+  client-go's stock defaults (`QPS=5/Burst=10`) by virtue of building
+  the `rest.Config` by hand and never setting these fields.
+- `c.RateLimiter = nil` is defensive: if `InClusterConfig` or
+  `BuildConfigFromFlags` ever stashes a default limiter on the
+  config, clearing it lets the `QPS=-1` setting actually take effect.
 
-Consumer side:
+Why force, not guard with `if c.QPS == 0`:
 
-```go
-func (p *Provider) runStatusWriter(ctx context.Context) {
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        case r := <-p.statusQueue:
-            p.flushStatusReport(ctx, r)
-        }
-    }
-}
-```
-
-`flushStatusReport` walks the report and calls the existing
-`clientWrapper.Update*Status` methods. Per-resource sequential at
-first (matches NGF today). The existing equality dedup and conflict
-retry stay where they are.
-
-Lifecycle:
-
-- The writer goroutine is started from `Provider.Provide`, scoped to
-  the same `safe.Pool` / `ctx` as the rebuild loop.
-- Shutdown: closing `ctx` drains and exits. A pending report at exit
-  is dropped — restart will produce the same content from listers.
+- Traefik exposes no surface for an operator to set `QPS` on the
+  gateway provider's `rest.Config`. A guard would be dead code.
+- We are a controller; we want APF-backed backpressure, not a
+  hardcoded client-side bucket. If the apiserver is in trouble, APF
+  will throttle us on the server side — that's the right place.
 
 Tests:
 
-- Existing `kubernetes_test.go` tests that assert specific
-  `UpdateXxxStatus` call sequences will need to wait for the
-  writer goroutine to drain. Add a `WaitForStatusFlush(t)` helper.
-- A new test: enqueue two reports back-to-back; assert the second
-  overwrites the first (only the second's content lands).
-- Kind harness re-run: time-to-stable drops to comparable numbers
-  with NGF (29s for 1000 routes is the next-worst peer; aim to clear
-  that bar).
+- No unit test needed beyond the existing client construction tests
+  (which will continue to pass).
+- Kind harness regression check: `setupTime` and `timeToQuiescence`
+  for N=1000 must remain in the single-digit seconds.
 
-### Step 3 — Bounded parallelism within the writer
+### Step 3 — Publish config before status writes (synchronous reorder)
 
-Once Step 2 is in, the per-resource writes are still sequential
-inside the writer. Parallelise with a small worker pool. Default
-8 workers, configurable via a private const for now (no public
-API).
+**The one good idea from the earlier async-rewrite draft.** No
+goroutine, no queue, no latest-wins. Same goroutine as today, just
+one statement reordered after a small refactor.
 
-Implementation — **two-phase flush, not one flat pool**:
+Current shape: `loadConfigurationFromGateways` writes every status
+*inline* during the rebuild walk (GatewayClass at the top, route
+statuses interleaved with route loading, Gateway status at the end —
+`kubernetes.go:355,420` and inside each route loader). After all of
+that returns, `Provide` hashes the config and sends it to
+`configurationChan`. **Result:** the data plane only learns about new
+routes after every status write has landed.
 
-1. **Phase 1 — GatewayClass and Gateway statuses.** Written first,
-   before any route status. Count is small (handful of objects);
-   sequential or a 2-worker pool, either is fine.
-2. **Phase 2 — route + BackendTLSPolicy statuses.** Started only
-   after Phase 1 returns. Fanned out via `errgroup.WithContext`
-   (or `safe.Pool`) bounded to N workers (default 8).
+New shape:
 
-Why phased, not "flat pool with submission ordering": O2 in §3
-("AttachedRoutes converges ahead of route status") is a
-*guarantee* the design has to make, not a behaviour we hope the
-scheduler delivers. In a flat 8-worker pool, submission ordering
-puts Gateway/GatewayClass in the first batch — but a slow Gateway
-write that hits a 409-retry, or a future change that adds more
-Gateway-level work, can let route closures grab workers and
-starve the Gateway write back into the tail. A two-phase split
-makes the ordering structural: Phase 2 cannot start until Phase 1
-returns, so AttachedRoutes is always visible before any route
-status lands. No measurement required to know this holds.
+1. `loadConfigurationFromGateways` collects status writes into an
+   in-memory `*statusReport` (a struct of `map[NamespacedName]Status`
+   per kind, populated as the rebuild walks listers) and returns
+   `(*dynamic.Configuration, *statusReport)`. No `client.Update*Status`
+   calls during the rebuild.
+2. `Provide` does, in order, on the same goroutine:
+   - `conf, report := p.loadConfigurationFromGateways(ctx)`
+   - hash + dedup as today
+   - on change: `configurationChan <- dynamic.Message{...}` *first*
+   - then `p.flushStatusReport(ctx, report)` — sequential `for` loop
+     over the report, calling the existing `client.Update*Status`
+     methods, in the order GatewayClass → Gateway → routes → policies.
 
-Conflict retry stays inside each closure. Because the writer is
-single-goroutine across flushes (see Step 2's coalescing notes),
-two workers never race on the same object; the only 409s seen are
-from external writers, which `RetryOnConflict` already handles.
+Why synchronous (not async):
 
-Observability — per-resource failure must be visible:
+- The bench shows the floor is already `apiserver_round_trip × N`
+  (~4s for N=1000 on kind) once the client-side rate limiter is out
+  of the way. There is no headroom for an async writer to claw back.
+- Async introduces a writer-goroutine lifecycle, latest-wins
+  coalescing, shutdown semantics, test-only sync helpers — none of
+  which earn their keep at current perf.
+- Synchronous keeps the test contract intact: tests that read status
+  immediately after `loadConfigurationFromGateways` returns continue
+  to see the written status, because the flush ran on the same
+  goroutine before `Provide` loops back to the next event.
 
-Today, when a status write fails, the error is logged on the
-rebuild goroutine right next to the route it relates to, so a
-human reading the logs can immediately see which object is
-broken. After decoupling, the writer is the only goroutine with
-that context — but the per-resource closure has `(kind,
-namespace, name)` in scope, so we can log a structured
-diagnostic with no extra plumbing:
+Why config-first inside `Provide`:
 
-```go
-log.Ctx(ctx).Warn().
-    Err(err).
-    Str("kind", "HTTPRoute").
-    Str("namespace", ns).
-    Str("name", name).
-    Msg("status write failed")
-```
+- The data plane should start serving the new routes the moment the
+  configuration is ready. Today it can't, because the rebuild
+  goroutine is still doing ~1000 sequential status writes before
+  `Provide` reaches the `configurationChan <- ...` line.
+- Status writes are observation, not authorisation: K8s does not
+  require Gateway status to be written before traffic flows.
 
-Why this matters as part of Step 3, not a follow-up:
+Refactor scope (one PR):
 
-- Without per-object logging, a status write that fails
-  repeatedly leaves the object's status stale forever and the
-  failure is invisible — the rebuild loop happily continues, the
-  data plane is fine, and the only symptom is "the
-  conformance/test suite sees stale status weeks later".
-- The retry-conflict path inside `UpdateXxxStatus` already
-  swallows transient 409s; the log line above only fires for
-  the terminal error after retries are exhausted, so it isn't
-  spammy.
-- A counter metric
-  (`traefik_gateway_status_write_failures_total{kind=…}`) is the
-  obvious Prometheus follow-up — deferred to §8 — but the log
-  line is the minimum bar and is free given the closure's scope.
+- New file `status.go`: `statusReport` struct, `newStatusReport()`,
+  `(p *Provider).flushStatusReport(ctx, report)`. Pure data + a flush
+  function; no goroutine, no channel.
+- `kubernetes.go`: `loadConfigurationFromGateways` returns the report;
+  status-write calls inside it become map assignments; `Provide`
+  publishes the config then calls `flushStatusReport`.
+- `httproute.go`, `grpcroute.go`, `tlsroute.go`, `tcproute.go`: route
+  loaders take `*statusReport` and append to it instead of calling
+  `client.UpdateXxxRouteStatus`. Same change inside `loadHTTPServers`
+  for BackendTLSPolicy.
 
 Tests:
 
-- Add a race condition test: two reports with overlapping resources
-  flushed back-to-back; assert no apiserver conflicts surface and
-  final state matches the second report.
-- Kind harness: time-to-stable improves further at N=1000, and
-  the AttachedRoutes timestamp lands within the first 1/8 of the
-  flush wall time (i.e., is not pinned to the tail).
-- Failure-path test: stub `UpdateHTTPRouteStatus` to return a
-  permanent error for one specific route; assert the warn log line
-  is emitted with `kind=HTTPRoute name=that-route`, and no other
-  routes are affected.
+- Existing assertions on `UpdateXxxStatus` call sequences keep working
+  because the flush is still synchronous within `Provide`. The unit
+  tests that drive `loadConfigurationFromGateways` directly need to
+  call `flushStatusReport` themselves (or be updated to assert against
+  the returned report).
+- Kind harness re-run: `setupTime` and `timeToQuiescence` should not
+  regress; the primary improvement is perceived-latency on data-plane
+  updates, which the harness does not currently observe.
 
 ### Step 4 — Foreign-parent correctness fix
 
-Independent of the perf rewrite, deliberately landed after it so the
-perf numbers are judged against current (buggy) behaviour first.
-Filtering foreign parents only reduces the status footprint further,
-so it can't degrade the post-rewrite metrics.
+Independent of the perf chain. Filtering foreign parents only reduces
+the status footprint further, so it can't degrade the post-Step-2/3
+metrics.
 
 Algorithm:
 
@@ -547,31 +464,59 @@ Tests:
 
 Tests: regression-only. Status content unchanged.
 
+### Step 6 — Decouple status writes from the rebuild (DROPPED)
+
+> **Dropped.** The async writer-goroutine + 1-slot latest-wins queue +
+> Gateway-first write ordering design was built to amortise a per-write
+> cost that turned out to be artificial (client-go default `QPS=5/Burst=10`).
+> Once Step 2 removed the rate limiter, the same N=1000 bench that
+> motivated this step closes `timeToQuiescence` in ~4s on the same
+> hardware where this step alone left it at 197s. The added complexity
+> (extra goroutine, lifecycle, test-only sync helpers, latest-wins
+> coalescing) buys nothing in this regime.
+>
+> The one good idea — push the dynamic configuration to the
+> configuration channel *before* the status writes — survives in
+> Step 3, done synchronously on the rebuild goroutine.
+>
+> Full prior design (writer goroutine, latest-wins semantics, shutdown
+> handling, two-phase worker pool) is in git history at commit
+> `4184ef6a8` if we ever need to revive it (e.g., if a future
+> apiserver-side bottleneck makes inline writes block the rebuild loop
+> measurably).
+
+### Step 7 — Bounded parallelism within the writer (DROPPED)
+
+> **Dropped** for the same reason as Step 6. None of the three
+> reference implementations (kgateway, Contour, NGF) parallelise
+> per-resource status writes; they are all single-writer-goroutine
+> sequential. Once the client-side rate limiter is out of the way
+> (Step 2), the wall time of N sequential writes is
+> `N × apiserver_round_trip`, which on a kind cluster is already a few
+> seconds at N=1000. A worker pool would put us ahead of the field
+> without a measured need.
+
 ## 6. Risks & rollback
 
-- **Risk:** decoupling status from rebuild changes the timing
-  contract — an external observer (a conformance test, a CI script)
-  that polls "config applied implies status written" might race.
-  *Mitigation:* the conformance suite tolerates eventual consistency;
-  any in-tree test that asserts immediate status visibility uses a
-  poll/wait helper.
+- **Risk (Step 2):** uncapping client-side QPS pushes more load onto
+  the apiserver in pathological cases (e.g., a misconfigured cluster
+  with no APF, or a route-status thrash loop). *Mitigation:* the
+  apiserver's own API Priority and Fairness (APF) is the right place
+  to backpressure controllers; client-side caps mask the real problem.
+  If a real incident materialises, an operator-tunable QPS knob can
+  be added then.
 
-- **Risk:** the latest-wins queue means an intermediate rebuild's
-  status is never written. *Mitigation:* every rebuild reads the
-  full state from listers; the next report is always self-contained,
-  so dropping an earlier report only delays convergence by one tick.
+- **Risk (Step 3):** reordering config-send ahead of status-write
+  changes the timing contract — an external observer (a conformance
+  test, a CI script) that polls "config applied implies status
+  written" might race. *Mitigation:* the conformance suite tolerates
+  eventual consistency; in-tree tests that assert immediate status
+  visibility either drive `loadConfigurationFromGateways` + call
+  `flushStatusReport` directly, or use a poll/wait helper.
 
-- **Risk:** the writer goroutine outlives the rebuild loop on panic.
-  *Mitigation:* both are scoped to the same `safe.OperationWithRecover`
-  pool used by `Provide`.
-
-- **Rollback:** each step is a single PR.
-  - If Step 2 (decouple) destabilises, revert that PR — Step 1
-    (harness) still gives us a repeatable measurement.
-  - If Step 3 (parallelism) destabilises, revert it — Step 2 keeps
-    the bulk of the perf win.
-  - Step 4 (foreign-parent fix) is independent of the perf chain;
-    revertable on its own.
+- **Rollback:** each step lands as its own commit, so a single
+  destabilising step can be reverted without touching the others.
+  Steps 6 and 7 are dropped — nothing to roll back.
 
 ## 7. Open questions
 
@@ -636,6 +581,18 @@ work-time investigation remain "open".
 
 ## 8. Deferred (TODO list, do not pursue now)
 
+- **Referenced-set predicate on informer events.** NGF skips wake-up
+  entirely when an event lands on a Service/EndpointSlice/Secret/
+  ConfigMap/Namespace that the current graph does not reference
+  (`internal/controller/state/change_processor.go:182-211`,
+  `store.go:284-336`). Traefik's equivalent today is the post-build
+  hash compare (`kubernetes.go:228-240`), which suppresses the
+  downstream config push but still pays for the rebuild. The 1-slot
+  drop on `eventCh` (`client.go:130`, `k8s/event_handler.go:34-39`)
+  already absorbs bursts, so the practical pre-Step-2 cost was bounded
+  — but in steady-state churn on unrelated resources we still rebuild
+  needlessly. Worth considering only if profiling shows steady-state
+  rebuild cost matters; deferred until we have data.
 - Wiring a perf-regression guard into CI. The kind harness is too
   heavy for per-PR CI (builds an image, brings up a cluster). The
   natural shape is a focused envtest unit test that asserts rebuild
