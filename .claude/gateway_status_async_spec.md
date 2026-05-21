@@ -31,6 +31,33 @@ Implications for this spec:
   write — which the bench polls — is now the *first* status I/O after
   the rebuild, so `AttachedRoutes==N` lands ~100ms after the last
   route create instead of ~4s (§5c → §5d, a ~40× drop).
+- **Step 3 follow-up — `statusReport` now accumulates per-parent and
+  per-ancestor entries instead of clobbering by resource key.** Landed
+  on the same branch. The initial Step 3 implementation stored
+  `map[NamespacedName]HTTPRouteStatus` (and the same shape for the
+  other route kinds plus `BackendTLSPolicy`), so when the rebuild
+  visited the same (route, parent) or (policy, ancestor) from more
+  than one call path in a single pass — most notably BackendTLSPolicy
+  written from inside `loadHTTPServers`, which is reached once per
+  (route × parent × listener × backend) combination — every write
+  overwrote the previous entry's single-element slice. Net effect:
+  only the *last* iteration's parent/ancestor survived in the
+  persisted status. The upstream conformance test
+  `BackendTLSPolicy/HTTP_request_sent_to_Service_with_valid_BackendTLSPolicy_should_succeed`
+  failed because of this: the policy was referenced from two
+  HTTPRoutes (HTTP listener `web` and HTTPS listener `websecure`),
+  the HTTPS iteration ran last and clobbered the HTTP ancestor, the
+  conformance harness was looking for the HTTP-listener ancestor with
+  `Accepted=True`, never found it, and gave up after its 60 s poll
+  deadline (the trailing rate-limiter error in the failure message
+  was a polling side-effect, not the cause). Fix: report entries are
+  now `map[NamespacedName][]RouteParentStatus` (for the four route
+  kinds) and `map[NamespacedName][]PolicyAncestorStatus` (for
+  BackendTLSPolicy), with `record*` helpers that upsert by
+  `ParentRef`/`AncestorRef` identity — last-write-wins applies *per
+  distinct ref*, never across refs. Gateway and GatewayClass are still
+  struct-valued because each gets exactly one atomic write per
+  rebuild.
 - **The async writer-goroutine design (Step 6) is dropped.** It was
   solving a downstream symptom of the rate-limiter cap; once Step 2
   lifts the cap, the architecture earns nothing. `timeToQuiescence`
@@ -41,8 +68,10 @@ Implications for this spec:
   cluster — well below the threshold where a worker pool would earn
   its keep.
 
-Status: Steps 1, 2, 3 landed. Step 4 (foreign-parent fix) and Step 5
-(cheap rebuild cleanups) still pending.
+Status: Steps 1, 2, 3 landed (Step 3 includes the slice-accumulation
+follow-up above). `make test-gateway-api-conformance` passes on the
+current branch tip. Step 4 (foreign-parent fix) and Step 5 (cheap
+rebuild cleanups) still pending.
 
 **PR plan:** Steps 1, 2, 3, 5 ship together in one PR; Step 4
 (foreign-parent fix) ships separately in a follow-up PR. Steps 6 and 7
@@ -206,6 +235,16 @@ This is the basis for parking Step 3 (see §5).
 - Config-send happens before status-write. Today implicit; after
   the rewrite explicit (rebuild ends → config sent → writer
   flushes async).
+- **`statusReport` preserves every distinct parent/ancestor.** A
+  resource visited from multiple call paths within one rebuild ends
+  up with one entry per distinct `ParentRef`/`AncestorRef` in its
+  persisted status — never collapsed to whichever loop iteration
+  ran last. Enforced by `upsertRouteParent` and
+  `recordBackendTLSPolicyAncestor` in `status.go`. The Gateway API
+  spec requires this for BackendTLSPolicy (one ancestor per
+  `(Gateway, listener)` pair the policy applies to); it is also the
+  natural shape for `RouteParentStatus` when a route has multiple
+  `parentRefs`.
 
 ### Test impact
 
@@ -414,6 +453,60 @@ Tests:
 - Kind harness re-run: `setupTime` and `timeToQuiescence` should not
   regress; the primary improvement is perceived-latency on data-plane
   updates, which the harness does not currently observe.
+
+#### Step 3 follow-up — accumulate per-(parent, ancestor) entries
+
+Caught by `make test-gateway-api-conformance` after the initial
+Step 3 commit landed: `BackendTLSPolicy/HTTP_request_sent_to_Service_with_valid_BackendTLSPolicy_should_succeed`
+timed out at the conformance harness's 60 s polling deadline.
+
+Root cause: the first `statusReport` design keyed the route and
+BackendTLSPolicy maps by `NamespacedName` and stored the full
+`*RouteStatus` / `PolicyStatus` (each containing a slice of
+parents/ancestors) as the value. `loadHTTPServers` is called once per
+`(route × parent × listener × backend)` combination, and on each call
+it computed a single-entry `Ancestors` slice and assigned it to the
+map — i.e., each write threw away whatever the previous iteration had
+recorded for that policy. In the failing test the `normative-test`
+policy was referenced by two HTTPRoutes (`backendtlspolicy` on the
+`web` listener, `backendtlspolicy-reencrypt` on the `websecure`
+listener); the websecure iteration ran last, the persisted status
+listed only that ancestor, the conformance harness expected the
+`web`-listener ancestor with `Accepted=True`, never found it, and the
+rate-limiter error in the failure message was just the harness's
+client running out of polling budget — symptom, not cause.
+
+(In the pre-Step-3 inline-write world the same logic existed inside
+`loadHTTPServers`, but each call hit the apiserver directly, and the
+test happened to pass because the harness sometimes raced the
+intermediate write where the `web` ancestor was the latest. Step 3
+made the last-write-loses semantics deterministic — every time, only
+the last iteration survived — which is what surfaced the bug.)
+
+Fix (one commit):
+
+- `statusReport.{http,grpc,tcp,tls}Routes` are now
+  `map[NamespacedName][]RouteParentStatus`.
+- `statusReport.backendTLSPolicies` is now
+  `map[NamespacedName][]PolicyAncestorStatus`.
+- New helpers `record{HTTP,GRPC,TCP,TLS}RouteParent` and
+  `recordBackendTLSPolicyAncestor`, plus a shared `upsertRouteParent`
+  / `parentRefEquals`, append or replace entries by
+  `ParentRef`/`AncestorRef` identity (last-write-wins applies only
+  *within* the same ref, never across refs).
+- The four route loaders no longer accumulate a local
+  `parentStatuses` slice and write the whole route at the end of the
+  parent loop — each parent is recorded into the report directly.
+- `flushStatusReport` wraps each slice into the appropriate
+  `*RouteStatus` / `PolicyStatus` before calling the existing
+  `client.UpdateXxxStatus`.
+- Gateway and GatewayClass are left struct-valued (one atomic write
+  per rebuild; their internal slices — `Listeners`, `Conditions`,
+  `SupportedFeatures` — are built in one shot inside the rebuild
+  itself, not from multiple call paths).
+
+Verification: `make test-gateway-api-conformance` passes on the
+current branch tip.
 
 ### Step 4 — Foreign-parent correctness fix
 
