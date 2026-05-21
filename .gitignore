@@ -26,3 +26,4 @@ integration/gateway-api-conformance-reports/**/experimental-dev-default-report.y
 *.pprof
 *.pb.gz
 loadgen
+!hack/perf/cmd/loadgen/

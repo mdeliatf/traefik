@@ -59,19 +59,35 @@ What it does:
 
 ## Output
 
-The loadgen prints a JSON report like:
+The loadgen prints a human-readable report to stdout, e.g.:
 
-```json
-{
-  "routes": 1000,
-  "createDuration": "32.4s",
-  "timeToStable": "118.7s",
-  "statusEventCount": 1042,
-  "namespace": "traefik-perf",
-  "gatewayClass": "traefik-perf-class",
-  "gateway": "traefik-perf-gateway"
-}
 ```
+Gateway-status perf benchmark report
+====================================
+
+Run
+  Routes               1000
+  Concurrency          1
+  Namespace            traefik-perf
+  GatewayClass         traefik-perf-class
+  Gateway              traefik-perf-gateway
+
+Timings
+  Create duration      32.4s       (create all 1000 HTTPRoutes)
+  Setup time           86.3s       (last create → AttachedRoutes=1000)
+  Time to AttachedRoutes=N 118.7s  (start → AttachedRoutes=1000)
+  Time to quiescence   123.7s      (start → no HTTPRoute status writes for the quiescence window)
+
+Counters
+  Gateway status writes 42
+  HTTPRoute events      1042
+
+AttachedRoutes progression (12 samples)
+…
+```
+
+When `-out=<path>` is passed (the bench script always does), the same
+report is also serialized as JSON to that file for machine consumption.
 
 The script also extracts `/var/log/kubernetes/audit/audit.log` from the
 kind control-plane node and counts status updates on
