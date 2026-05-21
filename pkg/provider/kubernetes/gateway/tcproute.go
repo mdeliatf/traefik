@@ -33,7 +33,7 @@ func (p *Provider) loadTCPRoutes(ctx context.Context, gatewayListeners []gateway
 			continue
 		}
 
-		var parentStatuses []gatev1alpha2.RouteParentStatus
+		routeNN := ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}
 		for _, parentRef := range route.Spec.ParentRefs {
 			parentStatus := &gatev1alpha2.RouteParentStatus{
 				ParentRef:      parentRef,
@@ -72,13 +72,7 @@ func (p *Provider) loadTCPRoutes(ctx context.Context, gatewayListeners []gateway
 				parentStatus.Conditions = upsertRouteConditionResolvedRefs(parentStatus.Conditions, resolveRefCondition)
 			}
 
-			parentStatuses = append(parentStatuses, *parentStatus)
-		}
-
-		report.tcpRoutes[ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}] = gatev1alpha2.TCPRouteStatus{
-			RouteStatus: gatev1alpha2.RouteStatus{
-				Parents: parentStatuses,
-			},
+			report.recordTCPRouteParent(routeNN, *parentStatus)
 		}
 	}
 }

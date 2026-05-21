@@ -38,7 +38,7 @@ func (p *Provider) loadGRPCRoutes(ctx context.Context, gatewayListeners []gatewa
 			continue
 		}
 
-		var parentStatuses []gatev1.RouteParentStatus
+		routeNN := ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}
 		for _, parentRef := range route.Spec.ParentRefs {
 			parentStatus := &gatev1.RouteParentStatus{
 				ParentRef:      parentRef,
@@ -84,13 +84,7 @@ func (p *Provider) loadGRPCRoutes(ctx context.Context, gatewayListeners []gatewa
 				parentStatus.Conditions = upsertRouteConditionResolvedRefs(parentStatus.Conditions, resolveRefCondition)
 			}
 
-			parentStatuses = append(parentStatuses, *parentStatus)
-		}
-
-		report.grpcRoutes[ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}] = gatev1.GRPCRouteStatus{
-			RouteStatus: gatev1.RouteStatus{
-				Parents: parentStatuses,
-			},
+			report.recordGRPCRouteParent(routeNN, *parentStatus)
 		}
 	}
 }

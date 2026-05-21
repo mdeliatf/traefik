@@ -41,7 +41,7 @@ func (p *Provider) loadHTTPRoutes(ctx context.Context, gatewayListeners []gatewa
 			continue
 		}
 
-		var parentStatuses []gatev1.RouteParentStatus
+		routeNN := ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}
 		for _, parentRef := range route.Spec.ParentRefs {
 			parentStatus := &gatev1.RouteParentStatus{
 				ParentRef:      parentRef,
@@ -87,13 +87,7 @@ func (p *Provider) loadHTTPRoutes(ctx context.Context, gatewayListeners []gatewa
 				parentStatus.Conditions = upsertRouteConditionResolvedRefs(parentStatus.Conditions, resolveRefCondition)
 			}
 
-			parentStatuses = append(parentStatuses, *parentStatus)
-		}
-
-		report.httpRoutes[ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}] = gatev1.HTTPRouteStatus{
-			RouteStatus: gatev1.RouteStatus{
-				Parents: parentStatuses,
-			},
+			report.recordHTTPRouteParent(routeNN, *parentStatus)
 		}
 	}
 }
@@ -482,9 +476,10 @@ func (p *Provider) loadHTTPServers(namespace string, route *gatev1.HTTPRoute, ba
 					},
 				)
 
-				report.backendTLSPolicies[ktypes.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}] = gatev1.PolicyStatus{
-					Ancestors: []gatev1.PolicyAncestorStatus{policyAncestorStatus},
-				}
+				report.recordBackendTLSPolicyAncestor(
+					ktypes.NamespacedName{Namespace: policy.Namespace, Name: policy.Name},
+					policyAncestorStatus,
+				)
 
 				continue
 			}
@@ -511,9 +506,10 @@ func (p *Provider) loadHTTPServers(namespace string, route *gatev1.HTTPRoute, ba
 				})
 			}
 
-			report.backendTLSPolicies[ktypes.NamespacedName{Namespace: policy.Namespace, Name: policy.Name}] = gatev1.PolicyStatus{
-				Ancestors: []gatev1.PolicyAncestorStatus{policyAncestorStatus},
-			}
+			report.recordBackendTLSPolicyAncestor(
+				ktypes.NamespacedName{Namespace: policy.Namespace, Name: policy.Name},
+				policyAncestorStatus,
+			)
 
 			// When something wen wrong during the loading of a ServersTransport,
 			// we stop here and return a route condition error.

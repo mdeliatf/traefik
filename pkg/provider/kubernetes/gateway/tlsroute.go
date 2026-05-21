@@ -32,7 +32,7 @@ func (p *Provider) loadTLSRoutes(ctx context.Context, gatewayListeners []gateway
 			continue
 		}
 
-		var parentStatuses []gatev1.RouteParentStatus
+		routeNN := ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}
 		for _, parentRef := range route.Spec.ParentRefs {
 			parentStatus := &gatev1.RouteParentStatus{
 				ParentRef:      parentRef,
@@ -76,7 +76,7 @@ func (p *Provider) loadTLSRoutes(ctx context.Context, gatewayListeners []gateway
 				parentStatus.Conditions = upsertRouteConditionResolvedRefs(parentStatus.Conditions, resolveRefCondition)
 			}
 
-			parentStatuses = append(parentStatuses, *parentStatus)
+			report.recordTLSRouteParent(routeNN, *parentStatus)
 		}
 
 		// When there is at least one TLS listener, we add a default deny-all route to avoid accepting traffic for undefined hosts.
@@ -91,12 +91,6 @@ func (p *Provider) loadTLSRoutes(ctx context.Context, gatewayListeners []gateway
 			conf.TCP.Services["deny-unknown-host"] = &dynamic.TCPService{
 				LoadBalancer: &dynamic.TCPServersLoadBalancer{},
 			}
-		}
-
-		report.tlsRoutes[ktypes.NamespacedName{Namespace: route.Namespace, Name: route.Name}] = gatev1.TLSRouteStatus{
-			RouteStatus: gatev1.RouteStatus{
-				Parents: parentStatuses,
-			},
 		}
 	}
 }
